@@ -3,7 +3,7 @@ name: Build Windows Releases
 on:
   push:
     branches:
-      - master
+      - zh_CN
       - actions
     tags:
       - '*'
@@ -98,7 +98,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         id: check_ver
         run: |
-          powershell "$ver = (Get-ItemProperty .\QSVEncC_Release\QSVEncC*.exe).VersionInfo.FileVersion; if ($ver -eq '${{ needs.get_version_name.outputs.version_name }}') { exit 0; } exit 1;"
+          powershell "$ver = (Get-ItemProperty .\QSVEncC_Release\QSVEncC*.exe).VersionInfo.FileVersion; if ($ver -eq ) { exit 0; } exit 1;"
 
       - name: Upload Release Asset
         id: upload-release-asset 
@@ -179,53 +179,60 @@ jobs:
       - name: Create package
         id: archieve
         run: |
-          mkdir Aviutl_QSVEnc_release
-          7z x -oAviutl_QSVEnc_release\ auo_setup.zip
-          mkdir Aviutl_QSVEnc_release\exe_files\QSVEncC
-          mkdir Aviutl_QSVEnc_release\exe_files\QSVEncC\x86
-          mkdir Aviutl_QSVEnc_release\exe_files\QSVEncC\x64
-          7z x -oAviutl_QSVEnc_release\exe_files\QSVEncC\x86\ QSVEncC_${{ needs.get_version_name.outputs.version_name }}_Win32.7z
-          7z x -oAviutl_QSVEnc_release\exe_files\QSVEncC\x64\ QSVEncC_${{ needs.get_version_name.outputs.version_name }}_x64.7z
-          copy /y _build\Win32\Release\QSVEnc.auo Aviutl_QSVEnc_release\plugins\
-          copy /y QSVEnc\QSVEnc.ini Aviutl_QSVEnc_release\plugins\
-          copy /y QSVEnc\QSVEnc.en.ini Aviutl_QSVEnc_release\plugins\
-          copy /y QSVEnc\QSVEnc.zh.ini Aviutl_QSVEnc_release\plugins\
-          copy /y QSVEnc\auo_setup.ini Aviutl_QSVEnc_release\exe_files\
-          copy /y QSVEnc\QSVEnc_readme.txt Aviutl_QSVEnc_release\
-          copy /y "QSVEnc\QSVが利用可能か確認 [ダブルクリック].bat" Aviutl_QSVEnc_release\
-          copy /y "QSVEnc\デバイスマネージャを開く [ダブルクリック].bat" Aviutl_QSVEnc_release\
-          echo D | xcopy /y /e QSVEnc\stg Aviutl_QSVEnc_release\plugins\QSVEnc_stg
-          dir /b /s Aviutl_QSVEnc_release\
-          7z a -mx9 Aviutl_QSVEnc_${{ needs.get_version_name.outputs.version_name }}.zip .\Aviutl_QSVEnc_release\*
+          mkdir QSVEnc_release
+          7z x -oQSVEnc_release\ auo_setup.zip
+          mkdir QSVEnc_release\exe_files\QSVEncC
+          mkdir QSVEnc_release\exe_files\QSVEncC\x86
+          mkdir QSVEnc_release\exe_files\QSVEncC\x64
+          7z x -oQSVEnc_release\exe_files\QSVEncC\x86\ QSVEncC_${{ needs.get_version_name.outputs.version_name }}_Win32.7z
+          7z x -oQSVEnc_release\exe_files\QSVEncC\x64\ QSVEncC_${{ needs.get_version_name.outputs.version_name }}_x64.7z
+          copy /y _build\Win32\Release\QSVEnc.auo QSVEnc_release\plugins\
+          copy /y QSVEnc\QSVEnc.ini QSVEnc_release\plugins\
+          copy /y QSVEnc\QSVEnc.en.ini QSVEnc_release\plugins\
+          copy /y QSVEnc\QSVEnc.zh.ini QSVEnc_release\plugins\
+          copy /y QSVEnc\auo_setup.ini QSVEnc_release\exe_files\
+          copy /y QSVEnc\QSVEnc_readme.txt QSVEnc_release\
+          copy /y "QSVEnc\QSVが利用可能か確認 [ダブルクリック].bat" QSVEnc_release\
+          copy /y "QSVEnc\デバイスマネージャを開く [ダブルクリック].bat" QSVEnc_release\
+          echo D | xcopy /y /e QSVEnc\stg QSVEnc_release\plugins\QSVEnc_stg
+          dir /b /s QSVEnc_release\
+          7z a -mx9 QSVEnc.zip .\QSVEnc_release\*
 
       - name: Check Version
         id: check_ver
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          powershell "$ver = (Get-ItemProperty .\Aviutl_QSVEnc_release\plugins\QSVEnc.auo).VersionInfo.FileVersion; if ($ver -eq '${{ needs.get_version_name.outputs.version_name }}') { exit 0; } exit 1;"
+          powershell "$ver = (Get-ItemProperty .\QSVEnc_release\plugins\QSVEnc.auo).VersionInfo.FileVersion; if ($ver -eq ) { exit 0; } exit 1;"
 
       - name: Check dll
         id: check_dll
         run: |
-          "Aviutl_QSVEnc_release\exe_files\QSVEncC\x86\QSVEncC.exe" --check-avcodec-dll
-          "Aviutl_QSVEnc_release\exe_files\QSVEncC\x64\QSVEncC64.exe" --check-avcodec-dll
+          "QSVEnc_release\exe_files\QSVEncC\x86\QSVEncC.exe" --check-avcodec-dll
+          "QSVEnc_release\exe_files\QSVEncC\x64\QSVEncC64.exe" --check-avcodec-dll
 
       - name: Calc hash
         id: calc_hash
         run: |
-          7z h -scrc* Aviutl_QSVEnc_${{ needs.get_version_name.outputs.version_name }}.zip
+          7z h -scrc* QSVEnc.zip
+
+      - name: release
+        uses: actions/create-release@v1
+        id: create_release
+        with:
+          draft: false
+          prerelease: false
+          release_name: latest version
+          tag_name: new
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Upload Release Asset
         id: upload-release-asset 
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          files: Aviutl_QSVEnc_${{ needs.get_version_name.outputs.version_name }}.zip
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Aviutl_QSVEnc_${{ needs.get_version_name.outputs.version_name }}
-          path: Aviutl_QSVEnc_${{ needs.get_version_name.outputs.version_name }}.zip
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./QSVEnc.zip
+          asset_name: QSVEnc.zip
+          asset_content_type: application/zip
