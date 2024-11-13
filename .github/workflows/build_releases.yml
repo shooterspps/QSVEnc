@@ -210,7 +210,7 @@ jobs:
       - name: Calc hash
         id: calc_hash
         run: |
-          7z h -scrc* QSVEn.zip
+          7z h -scrc* QSVEnc.zip
 
       - name: delete release
         uses: dev-drprasad/delete-tag-and-release@v1.1
@@ -237,6 +237,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./QSVEn.zip
-          asset_name: QSVEn.zip
+          asset_path: ./QSVEnc.zip
+          asset_name: QSVEnc.zip
           asset_content_type: application/zip
