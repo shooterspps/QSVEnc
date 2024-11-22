@@ -641,6 +641,7 @@ RGYOutputRaw::RGYOutputRaw() :
     m_doviProfileDst(RGY_DOVI_PROFILE_UNSET),
     m_doviRpu(nullptr),
     m_doviRpuMetadataCopy(false),
+    m_doviRpuConvertParam(),
     m_timestamp(nullptr),
     m_prevInputFrameId(-1),
     m_prevEncodeFrameId(-1),
@@ -715,6 +716,7 @@ RGY_ERR RGYOutputRaw::Init(const TCHAR *strFileName, const VideoInfo *pVideoOutp
         m_doviProfileDst = rawPrm->doviProfile;
         m_doviRpu = rawPrm->doviRpu;
         m_doviRpuMetadataCopy = rawPrm->doviRpuMetadataCopy;
+        m_doviRpuConvertParam = rawPrm->doviRpuConvertParam;
         m_timestamp = rawPrm->vidTimestamp;
         m_debugDirectAV1Out = rawPrm->debugDirectAV1Out;
         m_HEVCAlphaChannelMode = rawPrm->HEVCAlphaChannelMode;
@@ -830,14 +832,14 @@ RGY_ERR RGYOutputRaw::WriteNextOneFrame(RGYBitstream *pBitstream) {
     }
     if (m_doviRpu) {
         std::vector<uint8_t> dovi_nal;
-        if (m_doviRpu->get_next_rpu(dovi_nal, bs_framedata.inputFrameId, m_VideoOutputInfo.codec) != 0) {
+        if (m_doviRpu->get_next_rpu(dovi_nal, m_doviProfileDst, &m_doviRpuConvertParam, bs_framedata.inputFrameId, m_VideoOutputInfo.codec) != 0) {
             AddMessage(RGY_LOG_ERROR, _T("Failed to get dovi rpu for %lld.\n"), bs_framedata.inputFrameId);
         }
         if (dovi_nal.size() > 0) {
             metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(dovi_nal, false, m_VideoOutputInfo.codec == RGY_CODEC_HEVC ? true : false));
         }
     } else if (m_doviRpuMetadataCopy) {
-        auto doviRpuConvPrm = (m_doviProfileDst == RGY_DOVI_PROFILE_COPY) ? std::make_unique<RGYFrameDataDOVIRpuConvertParam>(m_doviProfileDst) : nullptr;
+        auto doviRpuConvPrm = std::make_unique<RGYFrameDataDOVIRpuConvertParam>(m_doviProfileDst, m_doviRpuConvertParam);
         auto [err_dovirpu, metadata_dovi_rpu] = getMetadata<RGYFrameDataDOVIRpu>(RGY_FRAME_DATA_DOVIRPU, bs_framedata, doviRpuConvPrm.get());
         if (err_dovirpu != RGY_ERR_NONE) {
             return err_dovirpu;
@@ -919,7 +921,13 @@ RGY_ERR RGYOutFrame::WriteNextFrame(RGYFrame *pSurface) {
 
     if (m_bY4m) {
         if (!m_y4mHeaderWritten) {
-            WriteY4MHeader(m_fDest.get(), &m_VideoOutputInfo, pSurface->csp());
+            auto csp = pSurface->csp();
+            if (csp == RGY_CSP_NV12) {
+                csp = RGY_CSP_YV12;
+            } else if (csp == RGY_CSP_P010) {
+                csp = RGY_CSP_YV12_16;
+            }
+            WriteY4MHeader(m_fDest.get(), &m_VideoOutputInfo, csp);
             m_y4mHeaderWritten = true;
         }
         WRITE_CHECK(fwrite("FRAME\n", 1, strlen("FRAME\n"), m_fDest.get()), strlen("FRAME\n"));
@@ -1228,6 +1236,7 @@ RGY_ERR initWriters(
         writerPrm.doviRpu                 = doviRpu;
         writerPrm.doviRpuMetadataCopy     = common->doviRpuMetadataCopy;
         writerPrm.doviProfile             = common->doviProfile;
+        writerPrm.doviRpuConvertParam     = common->doviRpuParams;
         writerPrm.vidTimestamp            = vidTimestamp;
         writerPrm.videoCodecTag           = common->videoCodecTag;
         writerPrm.videoMetadata           = common->videoMetadata;
@@ -1542,6 +1551,7 @@ RGY_ERR initWriters(
             rawPrm.doviProfile = common->doviProfile;
             rawPrm.doviRpu = doviRpu;
             rawPrm.doviRpuMetadataCopy = common->doviRpuMetadataCopy;
+            rawPrm.doviRpuConvertParam = common->doviRpuParams;
             rawPrm.vidTimestamp = vidTimestamp;
             rawPrm.debugDirectAV1Out = common->debugDirectAV1Out;
             rawPrm.HEVCAlphaChannel = HEVCAlphaChannel;
