@@ -418,7 +418,7 @@ QSVVideoParam& QSVVideoParam::operator=(const QSVVideoParam &o) {
         }
     }
     videoPrm.NumExtParam = (mfxU16)buf.size();
-    videoPrm.ExtParam = &buf[0];
+    videoPrm.ExtParam = (buf.size()) ? &buf[0] : nullptr;
     return *this;
 }
 
@@ -523,6 +523,10 @@ std::vector<RGY_CSP> CheckDecFeaturesInternal(MFXVideoSession& session, mfxVersi
     case MFX_CODEC_AV1:
         videoPrm.mfx.CodecProfile        = MFX_PROFILE_AV1_MAIN;
         videoPrm.mfx.CodecLevel          = MFX_LEVEL_AV1_4;
+        break;
+    case MFX_CODEC_VVC:
+        videoPrm.mfx.CodecProfile        = MFX_PROFILE_VVC_MAIN10;
+        videoPrm.mfx.CodecLevel          = MFX_LEVEL_VVC_4;
         break;
     default:
         return supportedCsp;

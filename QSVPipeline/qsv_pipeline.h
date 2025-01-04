@@ -55,6 +55,7 @@
 #include "rgy_output.h"
 #include "rgy_opencl.h"
 #include "rgy_dummy_load.h"
+#include "rgy_device_usage.h"
 #include "qsv_vpp_mfx.h"
 #include "qsv_mfx_dec.h"
 #include "qsv_pipeline_ctrl.h"
@@ -114,6 +115,7 @@ protected:
     std::unique_ptr<QSVDevice> m_device;
     shared_ptr<EncodeStatus> m_pStatus;
     shared_ptr<CPerfMonitor> m_pPerfMonitor;
+    std::unique_ptr<RGYDeviceUsage> m_deviceUsage;
 
     int m_encWidth;
     int m_encHeight;
@@ -179,7 +181,7 @@ protected:
 
     virtual RGY_ERR InitLog(sInputParams *pParams);
     virtual RGY_ERR InitPerfMonitor(const sInputParams *pParams);
-    virtual RGY_ERR InitInput(sInputParams *pParams, std::vector<std::unique_ptr<QSVDevice>>& devList);
+    virtual RGY_ERR InitInput(sInputParams *pParams, DeviceCodecCsp& HWDecCodecCsp);
     virtual RGY_ERR InitChapters(const sInputParams *inputParam);
     virtual RGY_ERR InitFilters(sInputParams *inputParam);
     virtual std::vector<VppType> InitFiltersCreateVppList(const sInputParams *inputParam, const bool cspConvRequired, const bool cropRequired, const RGY_VPP_RESIZE_TYPE resizeRequired);
@@ -199,13 +201,14 @@ protected:
     virtual RGY_ERR InitMfxVpp();
     virtual RGY_ERR InitMfxEncode();
     RGY_ERR checkGPUListByEncoder(const sInputParams *inputParam, std::vector<std::unique_ptr<QSVDevice>>& deviceList);
-    RGY_ERR deviceAutoSelect(const sInputParams *inputParam, std::vector<std::unique_ptr<QSVDevice>>& deviceList);
+    RGY_ERR deviceAutoSelect(const sInputParams *inputParam, std::vector<std::unique_ptr<QSVDevice>>& deviceList, const RGYDeviceUsageLockManager *lock);
     virtual RGY_ERR InitSession(const sInputParams *inputParam, std::vector<std::unique_ptr<QSVDevice>>& deviceList);
     virtual RGY_ERR InitVideoQualityMetric(sInputParams *pParams);
     void applyInputVUIToColorspaceParams(sInputParams *inputParam);
     bool preferD3D11Mode(const sInputParams *pParams);
     RGY_CSP getEncoderCsp(const sInputParams *pParams, int *pShift = nullptr) const;
     bool VppAfsRffAware() const;
+    DeviceCodecCsp getHWDecCodecCsp(const bool skipHWDecodeCheck, std::vector<std::unique_ptr<QSVDevice>>& devList);
 
     virtual RGY_ERR readChapterFile(tstring chapfile);
 

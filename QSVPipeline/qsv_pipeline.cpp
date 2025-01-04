@@ -55,6 +55,7 @@ RGY_DISABLE_WARNING_POP
 #include "qsv_query.h"
 #include "rgy_def.h"
 #include "rgy_env.h"
+#include "rgy_device_info_cache.h"
 #include "rgy_filesystem.h"
 #include "rgy_input.h"
 #include "rgy_output.h"
@@ -1637,6 +1638,7 @@ CQSVPipeline::CQSVPipeline() :
     m_device(),
     m_pStatus(),
     m_pPerfMonitor(),
+    m_deviceUsage(),
     m_encWidth(0),
     m_encHeight(0),
     m_encPicstruct(RGY_PICSTRUCT_UNKNOWN),
@@ -1837,14 +1839,16 @@ RGY_ERR CQSVPipeline::InitOutput(sInputParams *inputParams) {
     return RGY_ERR_NONE;
 }
 
-RGY_ERR CQSVPipeline::InitInput(sInputParams *inputParam, std::vector<std::unique_ptr<QSVDevice>>& devList) {
-#if ENABLE_RAW_READER
-#if ENABLE_AVSW_READER
+DeviceCodecCsp CQSVPipeline::getHWDecCodecCsp(const bool skipHWDecodeCheck, std::vector<std::unique_ptr<QSVDevice>>& devList) {
     DeviceCodecCsp HWDecCodecCsp;
     for (const auto& dev : devList) {
-        HWDecCodecCsp.push_back(std::make_pair((int)dev->deviceNum(), dev->getDecodeCodecCsp(inputParam->ctrl.skipHWDecodeCheck)));
+        HWDecCodecCsp.push_back(std::make_pair((int)dev->deviceNum(), dev->getDecodeCodecCsp(skipHWDecodeCheck)));
     }
-#endif
+    return HWDecCodecCsp;
+}
+
+RGY_ERR CQSVPipeline::InitInput(sInputParams *inputParam, DeviceCodecCsp& HWDecCodecCsp) {
+#if ENABLE_RAW_READER
     m_pStatus.reset(new EncodeStatus());
 
     int subburnTrackId = 0;
@@ -3373,12 +3377,23 @@ RGY_ERR CQSVPipeline::checkGPUListByEncoder(const sInputParams *prm, std::vector
     return RGY_ERR_NONE;
 }
 
-RGY_ERR CQSVPipeline::deviceAutoSelect(const sInputParams *prm, std::vector<std::unique_ptr<QSVDevice>>& gpuList) {
+RGY_ERR CQSVPipeline::deviceAutoSelect(const sInputParams *prm, std::vector<std::unique_ptr<QSVDevice>>& gpuList, const RGYDeviceUsageLockManager *devUsageLock) {
     if (gpuList.size() <= 1) {
         return RGY_ERR_NONE;
     }
+    int maxDeviceUsageCount = 1;
+    std::vector<std::pair<int, int64_t>> deviceUsage;
+    if (gpuList.size() > 1) {
+        deviceUsage = m_deviceUsage->getUsage(devUsageLock);
+        for (size_t i = 0; i < deviceUsage.size(); i++) {
+            maxDeviceUsageCount = std::max(maxDeviceUsageCount, deviceUsage[i].first);
+            if (deviceUsage[i].first > 0) {
+                PrintMes(RGY_LOG_INFO, _T("Device #%d: %d usage.\n"), i, deviceUsage[i].first);
+            }
+        }
+    }
 #if ENABLE_PERF_COUNTER
-    PrintMes(RGY_LOG_DEBUG, _T("Auto select device from %d devices.\n"), (int)gpuList.size());
+    PrintMes(RGY_LOG_INFO, _T("Auto select device from %d devices.\n"), (int)gpuList.size());
     bool counterIsIntialized = m_pPerfMonitor->isPerfCounterInitialized();
     for (int i = 0; i < 4 && !counterIsIntialized; i++) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -3391,9 +3406,11 @@ RGY_ERR CQSVPipeline::deviceAutoSelect(const sInputParams *prm, std::vector<std:
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     auto entries = m_pPerfMonitor->GetPerfCountersSystem();
+#endif //#if ENABLE_PERF_COUNTER
 
     std::map<QSVDeviceNum, double> gpuscore;
     for (const auto &gpu : gpuList) {
+#if ENABLE_PERF_COUNTER
         auto counters = RGYGPUCounterWinEntries(entries).filter_luid(gpu->luid()).get();
         auto ve_utilization = std::max(
             RGYGPUCounterWinEntries(counters).filter_type(L"codec").sum(),
@@ -3403,15 +3420,21 @@ RGY_ERR CQSVPipeline::deviceAutoSelect(const sInputParams *prm, std::vector<std:
             RGYGPUCounterWinEntries(counters).filter_type(L"compute").max()), //vce-opencl
             RGYGPUCounterWinEntries(counters).filter_type(L"3d").max()), //qsv
             RGYGPUCounterWinEntries(counters).filter_type(L"videoprocessing").max());
-        double core_score = 0.0;
-        double cc_score = 0.0;
         double ve_score = 100.0 * (1.0 - std::pow(ve_utilization / 100.0, 1.0)) * prm->ctrl.gpuSelect.ve;
         double gpu_score = 100.0 * (1.0 - std::pow(gpu_utilization / 100.0, 1.5)) * prm->ctrl.gpuSelect.gpu;
-        double cl_score = gpu->devInfo() ? 0.0 : -100.0; // openclの初期化に成功したか?
+#else
+        double ve_score = 0.0;
+        double gpu_score = 0.0;
+#endif
+        double core_score = 0.0;
+        double cc_score = 0.0;
+        double cl_score = gpu->devInfo() ? 0.0 : maxDeviceUsageCount * -100.0; // openclの初期化に成功したか?
+        const int deviceUsageCount = (int)gpu->deviceNum() < (int)deviceUsage.size() ? deviceUsage[(int)gpu->deviceNum()].first : 0;
+        double usage_score = 100.0 * (maxDeviceUsageCount - deviceUsageCount) / (double)maxDeviceUsageCount;
 
-        gpuscore[gpu->deviceNum()] = cc_score + ve_score + gpu_score + core_score + cl_score;
-        PrintMes(RGY_LOG_DEBUG, _T("GPU #%d (%s) score: %.1f: VE %.1f, GPU %.1f, CC %.1f, Core %.1f, CL %.1f.\n"), gpu->deviceNum(), gpu->name().c_str(),
-            gpuscore[gpu->deviceNum()], ve_score, gpu_score, cc_score, core_score, cl_score);
+        gpuscore[gpu->deviceNum()] = usage_score + cc_score + ve_score + gpu_score + core_score + cl_score;
+        PrintMes(RGY_LOG_INFO, _T("GPU #%d (%s) score: %.1f: Use: %.1f, VE %.1f, GPU %.1f, CC %.1f, Core %.1f, CL %.1f.\n"), gpu->deviceNum(), gpu->name().c_str(),
+            gpuscore[gpu->deviceNum()], usage_score, ve_score, gpu_score, cc_score, core_score, cl_score);
     }
     std::sort(gpuList.begin(), gpuList.end(), [&](const std::unique_ptr<QSVDevice> &a, const std::unique_ptr<QSVDevice> &b) {
         if (gpuscore.at(a->deviceNum()) != gpuscore.at(b->deviceNum())) {
@@ -3420,16 +3443,20 @@ RGY_ERR CQSVPipeline::deviceAutoSelect(const sInputParams *prm, std::vector<std:
         return a->deviceNum() < b->deviceNum();
         });
 
-    PrintMes(RGY_LOG_DEBUG, _T("GPU Priority\n"));
+    PrintMes(RGY_LOG_INFO, _T("GPU Priority\n"));
     for (const auto &gpu : gpuList) {
-        PrintMes(RGY_LOG_DEBUG, _T("GPU #%d (%s): score %.1f\n"), gpu->deviceNum(), gpu->name().c_str(), gpuscore[gpu->deviceNum()]);
+        PrintMes(RGY_LOG_INFO, _T("GPU #%d (%s): score %.1f\n"), gpu->deviceNum(), gpu->name().c_str(), gpuscore[gpu->deviceNum()]);
     }
-#endif //#if ENABLE_PERF_COUNTER
     return RGY_ERR_NONE;
 }
 
 RGY_ERR CQSVPipeline::InitSession(const sInputParams *inputParam, std::vector<std::unique_ptr<QSVDevice>>& deviceList) {
     auto err = RGY_ERR_NONE;
+    std::unique_ptr<RGYDeviceUsageLockManager> devUsageLock;
+    if (deviceList.size() > 1) {
+        m_deviceUsage = std::make_unique<RGYDeviceUsage>();
+        devUsageLock = m_deviceUsage->lock(); // ロックは親プロセス側でとる
+    }
     if (deviceList.size() == 0) {
         PrintMes(RGY_LOG_DEBUG, _T("No device found for QSV encoding!\n"));
         return RGY_ERR_DEVICE_NOT_FOUND;
@@ -3439,12 +3466,21 @@ RGY_ERR CQSVPipeline::InitSession(const sInputParams *inputParam, std::vector<st
         if ((err = checkGPUListByEncoder(inputParam, deviceList)) != RGY_ERR_NONE) {
             return err;
         }
-        if ((err = deviceAutoSelect(inputParam, deviceList)) != RGY_ERR_NONE) {
+        if ((err = deviceAutoSelect(inputParam, deviceList, devUsageLock.get())) != RGY_ERR_NONE) {
             return err;
         }
         m_device = std::move(deviceList.front());
         PrintMes(RGY_LOG_DEBUG, _T("InitSession: selected device #%d: %s.\n"), (int)m_device->deviceNum(), m_device->name().c_str());
     }
+    if (m_deviceUsage) {
+        // 登録を解除するプロセスを起動
+        const auto [err_run_proc, child_pid] = m_deviceUsage->startProcessMonitor((int)m_device->deviceNum());
+        if (err_run_proc == RGY_ERR_NONE) {
+            // プロセスが起動できたら、その子プロセスのIDを登録する
+            m_deviceUsage->add((int)m_device->deviceNum(), child_pid, devUsageLock.get());
+        }
+    }
+    devUsageLock.reset();
 
     //使用できる最大のversionをチェック
     m_device->mfxSession().QueryVersion(&m_mfxVer);
@@ -3710,21 +3746,84 @@ RGY_ERR CQSVPipeline::Init(sInputParams *pParams) {
         PrintMes(RGY_LOG_DEBUG, _T("Set Process priority: %s.\n"), rgy_thread_priority_mode_to_str(priority));
     }
 
+    RGYParamThread threadParamThrottleDsiabled;
+    threadParamThrottleDsiabled.set(pParams->ctrl.threadParams.get(RGYThreadType::PROCESS).affinity, RGYThreadPriority::Normal, RGYThreadPowerThrottlingMode::Disabled);
+    threadParamThrottleDsiabled.apply(GetCurrentThread());
+
+#if defined(_WIN32) || defined(_WIN64)
+    if (!pParams->bDisableTimerPeriodTuning) {
+        m_bTimerPeriodTuning = true;
+        timeBeginPeriod(1);
+        PrintMes(RGY_LOG_DEBUG, _T("timeBeginPeriod(1)\n"));
+    }
+#endif //#if defined(_WIN32) || defined(_WIN64)
+
     m_sessionParams.threads = pParams->nSessionThreads;
     m_sessionParams.deviceCopy = pParams->gpuCopy;
     m_nAVSyncMode = pParams->common.AVSyncMode;
 
-    auto deviceList = getDeviceList(pParams->device, pParams->ctrl.enableOpenCL, pParams->ctrl.enableVulkan, pParams->memType, m_sessionParams, m_pQSVLog);
-    if (deviceList.size() == 0) {
-        PrintMes(RGY_LOG_DEBUG, _T("No device found for QSV encoding!\n"));
-        return RGY_ERR_DEVICE_NOT_FOUND;
+    DeviceCodecCsp HWDecCodecCsp;
+    auto deviceInfoCache = std::make_shared<QSVDeviceInfoCache>();
+    if ((sts = deviceInfoCache->loadCacheFile()) != RGY_ERR_NONE) {
+        if (sts == RGY_ERR_FILE_OPEN) { // ファイルは存在するが開けない
+            deviceInfoCache.reset(); // キャッシュの存在を無視して進める
+        }
+    } else {
+        HWDecCodecCsp = deviceInfoCache->getDeviceDecCodecCsp();
+        PrintMes(RGY_LOG_DEBUG, _T("HW dec codec csp support read from cache file.\n"));
+    }
+    std::vector<std::unique_ptr<QSVDevice>> deviceList;
+    auto getDevIdName = [&deviceList]() {
+        std::map<int, std::string> devIdName;
+        for (const auto& dev : deviceList) {
+            devIdName[(int)dev->deviceNum()] = tchar_to_string(dev->name());
+        }
+        return devIdName;
+    };
+    if (deviceInfoCache
+        && (deviceInfoCache->getDeviceIds().size() == 0
+        || (pParams->device == QSVDeviceNum::AUTO && deviceInfoCache->getDeviceIds().size() != HWDecCodecCsp.size())
+        || (pParams->device != QSVDeviceNum::AUTO && 
+            std::find_if(HWDecCodecCsp.begin(), HWDecCodecCsp.end(), [dev = (int)pParams->device](const std::pair<int, CodecCsp>& data) { return data.first == dev; }) == HWDecCodecCsp.end()))) {
+        deviceList = getDeviceList((deviceInfoCache->getDeviceIds().size() == 0) ? QSVDeviceNum::AUTO : pParams->device, pParams->ctrl.enableOpenCL, pParams->ctrl.enableVulkan, pParams->memType, m_sessionParams, deviceInfoCache, m_pQSVLog);
+        if (deviceList.size() == 0) {
+            PrintMes(RGY_LOG_DEBUG, _T("No device found for QSV encoding!\n"));
+            return RGY_ERR_DEVICE_NOT_FOUND;
+        }
+        HWDecCodecCsp = getHWDecCodecCsp(pParams->ctrl.skipHWDecodeCheck, deviceList);
+        deviceInfoCache->setDecCodecCsp(getDevIdName(), HWDecCodecCsp);
+        deviceInfoCache->saveCacheFile();
+        PrintMes(RGY_LOG_DEBUG, _T("HW dec codec csp support saved to cache file.\n"));
+        if (pParams->device != QSVDeviceNum::AUTO) {
+            for (auto it = deviceList.begin(); it != deviceList.end();) {
+                if ((*it)->deviceNum() != pParams->device) {
+                    it = deviceList.erase(it);
+                } else {
+                    it++;
+                }
+            }
+        }
     }
 
-    sts = InitInput(pParams, deviceList);
-    if (sts < RGY_ERR_NONE) return sts;
-    PrintMes(RGY_LOG_DEBUG, _T("InitInput: Success.\n"));
+    auto input_ret = std::async(std::launch::async, [&] {
+        threadParamThrottleDsiabled.apply(GetCurrentThread());
+        auto sts = InitInput(pParams, HWDecCodecCsp);
+        if (sts == RGY_ERR_NONE) {
+            pParams->applyDOVIProfile(m_pFileReader->getInputDOVIProfile());
+        }
+        return sts;
+    });
 
-    pParams->applyDOVIProfile(m_pFileReader->getInputDOVIProfile());
+    if (deviceList.size() == 0) {
+        deviceList = getDeviceList(pParams->device, pParams->ctrl.enableOpenCL, pParams->ctrl.enableVulkan, pParams->memType, m_sessionParams, deviceInfoCache, m_pQSVLog);
+        if (deviceList.size() == 0) {
+            PrintMes(RGY_LOG_INFO, _T("No device found for QSV encoding!\n"));
+            return RGY_ERR_DEVICE_NOT_FOUND;
+        }
+        if (deviceInfoCache) {
+            deviceInfoCache->setDeviceIds(getDevIdName());
+        }
+    }
 
     sts = InitSession(pParams, deviceList);
     RGY_ERR(sts, _T("Failed to initialize encode session."));
@@ -3732,6 +3831,11 @@ RGY_ERR CQSVPipeline::Init(sInputParams *pParams) {
 
     sts = InitOpenCL(pParams->ctrl.enableOpenCL, pParams->vpp.checkPerformance);
     if (sts < RGY_ERR_NONE) return sts;
+    PrintMes(RGY_LOG_DEBUG, _T("InitOpenCL: Success.\n"));
+
+    sts = input_ret.get();
+    if (sts < RGY_ERR_NONE) return sts;
+    PrintMes(RGY_LOG_DEBUG, _T("InitInput: Success.\n"));
 
     sts = CheckParam(pParams);
     if (sts != RGY_ERR_NONE) return sts;
@@ -3741,14 +3845,18 @@ RGY_ERR CQSVPipeline::Init(sInputParams *pParams) {
 
     sts = InitMfxDecParams();
     if (sts < RGY_ERR_NONE) return sts;
+    PrintMes(RGY_LOG_DEBUG, _T("InitMfxDecParams: Success.\n"));
 
     sts = InitFilters(pParams);
     if (sts < RGY_ERR_NONE) return sts;
+    PrintMes(RGY_LOG_DEBUG, _T("InitFilters: Success.\n"));
 
     sts = InitMfxEncodeParams(pParams, deviceList);
     if (sts < RGY_ERR_NONE) return sts;
+    PrintMes(RGY_LOG_DEBUG, _T("InitMfxEncodeParams: Success.\n"));
 
     deviceList.clear();
+    if (deviceInfoCache) deviceInfoCache->updateCacheFile();
 
     sts = InitPowerThrottoling(pParams);
     if (sts < RGY_ERR_NONE) return sts;
@@ -3778,18 +3886,10 @@ RGY_ERR CQSVPipeline::Init(sInputParams *pParams) {
         PrintMes(RGY_LOG_ERROR, _T("None of the pipeline element (DEC,VPP,ENC) are activated!\n"));
         return RGY_ERR_INVALID_VIDEO_PARAM;
     }
-    PrintMes(RGY_LOG_DEBUG, _T("pipeline element count: %d\n"), nPipelineElements);
+    PrintMes(RGY_LOG_INFO, _T("pipeline element count: %d\n"), nPipelineElements);
 
     sts = InitVideoQualityMetric(pParams);
     if (sts < RGY_ERR_NONE) return sts;
-
-#if defined(_WIN32) || defined(_WIN64)
-    if (!pParams->bDisableTimerPeriodTuning) {
-        m_bTimerPeriodTuning = true;
-        timeBeginPeriod(1);
-        PrintMes(RGY_LOG_DEBUG, _T("timeBeginPeriod(1)\n"));
-    }
-#endif //#if defined(_WIN32) || defined(_WIN64)
 
     if ((sts = InitAvoidIdleClock(pParams)) != RGY_ERR_NONE) {
         return sts;
@@ -3860,6 +3960,7 @@ void CQSVPipeline::Close() {
 
     PrintMes(RGY_LOG_DEBUG, _T("Closing device...\n"));
     m_device.reset();
+    m_deviceUsage.reset();
 
     m_trimParam.list.clear();
     m_trimParam.offset = 0;
@@ -4400,6 +4501,9 @@ RGY_ERR CQSVPipeline::RunEncode2() {
     if (m_videoQualityMetric) {
         PrintMes(RGY_LOG_DEBUG, _T("Write video quality metric results...\n"));
         m_videoQualityMetric->showResult();
+    }
+    if (m_deviceUsage) {
+        m_deviceUsage->close();
     }
     m_pStatus->WriteResults();
     if (filter_result.size()) {

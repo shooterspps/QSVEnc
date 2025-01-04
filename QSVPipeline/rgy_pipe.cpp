@@ -260,6 +260,20 @@ std::string RGYPipeProcessWin::getOutput() {
     return outstr;
 }
 
+int RGYPipeProcessWin::wait(uint32_t timeout) {
+    return WaitForSingleObject(m_phandle, timeout);
+}
+
+int RGYPipeProcessWin::waitAndGetExitCode() {
+    if (WaitForSingleObject(m_phandle, INFINITE) == WAIT_OBJECT_0) {
+        DWORD exitCode = 0;
+        if (GetExitCodeProcess(m_phandle, &exitCode)) {
+            return (int)exitCode;
+        }
+    }
+    return -1;
+}
+
 const PROCESS_INFORMATION& RGYPipeProcessWin::getProcessInfo() {
     return m_pi;
 }
@@ -309,9 +323,15 @@ void RGYPipeProcessWin::close() {
     memset(&m_pi, 0, sizeof(m_pi));
 }
 
+int RGYPipeProcessWin::pid() const {
+    return m_pi.dwProcessId;
+}
+
 bool RGYPipeProcessWin::processAlive() {
     return WAIT_TIMEOUT == WaitForSingleObject(m_phandle, 0);
 }
+
+
 #endif //defined(_WIN32) || defined(_WIN64)
 
 

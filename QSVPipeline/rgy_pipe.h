@@ -112,6 +112,9 @@ public:
     virtual int stdOutFpClose() = 0;
     virtual size_t stdErrFpRead(void *data, const size_t dataSize) = 0;
     virtual int stdErrFpClose() = 0;
+    virtual int wait(uint32_t timeout) = 0;
+    virtual int waitAndGetExitCode() = 0;
+    virtual int pid() const = 0;
 protected:
     virtual int startPipes() = 0;
     PROCESS_HANDLE m_phandle;
@@ -137,12 +140,19 @@ public:
     virtual int stdOutFpClose() override;
     virtual size_t stdErrFpRead(void *data, const size_t dataSize) override;
     virtual int stdErrFpClose() override;
+    virtual int wait(uint32_t timeout) override;
+    virtual int waitAndGetExitCode() override;
+    virtual int pid() const override;
     const PROCESS_INFORMATION& getProcessInfo();
 protected:
     virtual int startPipes() override;
     PROCESS_INFORMATION m_pi;
 };
 #else
+
+#ifndef INFINITE
+#define INFINITE (UINT_MAX)
+#endif
 class RGYPipeProcessLinux : public RGYPipeProcess {
 public:
     RGYPipeProcessLinux();
@@ -161,6 +171,9 @@ public:
     virtual int stdOutFpClose() override;
     virtual size_t stdErrFpRead(void *data, const size_t dataSize) override;
     virtual int stdErrFpClose() override;
+    virtual int wait(uint32_t timeout) override;
+    virtual int waitAndGetExitCode() override;
+    virtual int pid() const override;
 protected:
     virtual int startPipes() override;
 };
