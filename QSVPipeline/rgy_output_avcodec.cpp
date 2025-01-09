@@ -51,7 +51,8 @@ static bool format_is_mp4(const AVFormatContext *formatCtx) {
         "3g2",
         "ipod",
         "ismv",
-        "f4v"
+        "f4v",
+        "avif"
     };
     for (int i = 0; i < _countof(FORMAT_NAME_MP4); i++) {
         if (0 == _stricmp(formatCtx->oformat->name, FORMAT_NAME_MP4[i])) {
@@ -881,6 +882,11 @@ RGY_ERR RGYOutputAvcodec::InitVideo(const VideoInfo *videoOutputInfo, const Avco
     }
     m_Mux.video.streamOut->sample_aspect_ratio.num = videoOutputInfo->sar[0]; //mkvではこちらの指定も必要
     m_Mux.video.streamOut->sample_aspect_ratio.den = videoOutputInfo->sar[1];
+    if (format_is_mp4(m_Mux.format.formatCtx) && videoOutputInfo->sar[0] * videoOutputInfo->sar[1] <= 0) {
+        // mp4 muxerではsample_aspect_ratioが設定されていない(例えば0:0)だと、L-SMASHの"tkhd: Track Header Box" (mp4boxでは"Visual Track layout")のwidthは0になってしまう
+        m_Mux.video.streamOut->sample_aspect_ratio.num = 1;
+        m_Mux.video.streamOut->sample_aspect_ratio.den = 1;
+    }
     m_Mux.video.streamOut->avg_frame_rate.num = videoOutputInfo->fpsN; //mkvのTRACKDEFAULTDURATIONの出力に必要
     m_Mux.video.streamOut->avg_frame_rate.den = videoOutputInfo->fpsD;
     m_Mux.video.streamOut->start_time          = 0;
