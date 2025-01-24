@@ -141,7 +141,7 @@ static uint32_t faw_checksum_read(const uint8_t *buf) {
     return v;
 }
 
-int RGYAACHeader::sampleRateIdxToRate(const uint32_t idx) {
+int RGYFAWAACHeader::sampleRateIdxToRate(const uint32_t idx) {
     static const int samplerateList[] = {
         96000,
         88200,
@@ -161,7 +161,7 @@ int RGYAACHeader::sampleRateIdxToRate(const uint32_t idx) {
     return samplerateList[std::min<uint32_t>(idx, _countof(samplerateList)-1)];
 }
 
-int RGYAACHeader::parse(const uint8_t *buf) {
+int RGYFAWAACHeader::parse(const uint8_t *buf) {
     int check = 0;
     const uint8_t buf0 = buf[0];
     const uint8_t buf1 = buf[1];
