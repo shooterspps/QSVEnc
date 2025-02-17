@@ -31,9 +31,9 @@
 
 #include "rgy_rev.h"
 
-#define VER_FILEVERSION             0,7,79,0
-#define VER_STR_FILEVERSION          "7.79"
-#define VER_STR_FILEVERSION_TCHAR _T("7.79")
+#define VER_FILEVERSION             0,7,80,0
+#define VER_STR_FILEVERSION          "7.80"
+#define VER_STR_FILEVERSION_TCHAR _T("7.80")
 
 #ifdef _M_IX86
 #define BUILD_ARCH_STR _T("x86")
@@ -90,6 +90,7 @@ const char *get_encoder_version();
 #define ENABLE_AVCODEC_AUDPROCESS_THREAD 1
 #define ENABLE_CPP_REGEX 1
 #define ENABLE_DTL 1
+#define AVS_INTERF_VER 11
 
 #define AV_CHANNEL_LAYOUT_STRUCT_AVAIL 1
 #define AV_FRAME_DURATION_AVAIL 1
