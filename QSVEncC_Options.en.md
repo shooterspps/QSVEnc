@@ -245,6 +245,7 @@
   - [--vpp-perc-pre-enc](#--vpp-perc-pre-enc)
   - [--vpp-perf-monitor](#--vpp-perf-monitor)
 - [Other Options](#other-options)
+  - [--parallel \[\<int\>\] or \[\<string\>\]](#--parallel-int-or-string)
   - [--async-depth \<int\>](#--async-depth-int)
   - [--input-buf \<int\>](#--input-buf-int)
   - [--output-buf \<int\>](#--output-buf-int)
@@ -1966,6 +1967,7 @@ Performs tone mapping using [libplacebo](https://code.videolan.org/videolan/libp
   lut file path used in --vpp-libplacebo-tonemapping.
 
 ### --vpp-delogo &lt;string&gt;[,&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
+Specify the logo file and settings for the logo to be eliminated. The logo file supports ". lgd", ". ldp", and ". ldp2" formats.
 
 - **Parameters**
   - select=&lt;string&gt;  
@@ -3015,6 +3017,34 @@ Print processing time for each filter enabled. This is meant for profiling purpo
 overall performance will decrease as the application waits each filter to finish when checking processing time of them. 
 
 ## Other Options
+
+### --parallel [&lt;int&gt;] or [&lt;string&gt;]
+Enables parallel encoding by file splitting. Divides the input file into multiple chunks and encodes them in parallel using separate threads to accelerate processing.
+
+- **Restrictions**
+  Parallel encoding will be automatically disabled in the following cases:
+  - Input is from pipe
+  - Input is not seekable
+  - Frame timestamps are unstable
+  - No encoding is performed (-c raw)
+  - --dynamic-rc is enabled
+  - --trim option is enabled
+  - --timecode option is specified
+  - --tcfile-in option is specified
+  - --keyfile option is specified
+  - --key-on-chapter option is enabled
+  - ssim/psnr/vmaf is enabled
+  - --vpp-subburn (subtitle burn-in) is specified
+  - --vpp-fruc (frame interpolation) is enabled
+
+- **Examples**
+  ```
+  Example: Auto-determine number of parallel processes
+  --parallel auto
+
+  Example: Run with 3 parallel threads
+  --parallel 3
+  ```
 
 ### --async-depth &lt;int&gt;
 set async depth for QSV pipeline. default: 0 (=auto, 3frames)

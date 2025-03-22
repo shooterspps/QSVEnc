@@ -27,6 +27,7 @@
 
 #include <set>
 #include <fstream>
+#include <sstream>
 #include <iostream>
 #include <iomanip>
 #include "rgy_util.h"
@@ -46,6 +47,68 @@
 #if ENABLE_DTL
 #include <dtl/dtl.hpp>
 #endif //#if ENABLE_DTL
+
+std::vector<tstring> splitCommandLine(const TCHAR *cmd) {
+    std::vector<tstring> result;
+#if defined(_WIN32) || defined(_WIN64)
+    std::wstring cmdw = tchar_to_wstring(cmd);
+    int argc = 0;
+    auto argvw = CommandLineToArgvW(cmdw.c_str(), &argc);
+    if (argc <= 1) {
+        return result;
+    }
+    if (wcslen(argvw[0]) != 0) {
+        result.push_back(_T("")); // 最初は実行ファイルのパスが入っているのを模擬するため、空文字列を入れておく
+    }
+    for (int i = 0; i < argc; i++) {
+        result.push_back(wstring_to_tstring(argvw[i]));
+    }
+    LocalFree(argvw);
+#else
+    result.push_back(_T("")); // 最初は実行ファイルのパスが入っているのを模擬するため、空文字列を入れておく
+
+    tstring token;
+    bool inDoubleQuotes = false;
+    bool inSingleQuotes = false;
+    bool escape = false;
+    std::basic_stringstream<TCHAR> ss;
+
+    while (*cmd) {
+        TCHAR c = *cmd++;
+        if (escape) {
+            ss << c;
+            escape = false;
+        } else if (c == _T('\\')) {
+            escape = true;
+        } else if (c == _T('"')) {
+            if (!inSingleQuotes) {
+                inDoubleQuotes = !inDoubleQuotes;
+            } else {
+                ss << c;
+            }
+        } else if (c == _T('\'')) {
+            if (!inDoubleQuotes) {
+                inSingleQuotes = !inSingleQuotes;
+            } else {
+                ss << c;
+            }
+        } else if (c == _T(' ') && !inDoubleQuotes && !inSingleQuotes) {
+            if (!ss.str().empty() || escape) {
+                result.push_back(ss.str());
+                ss.str(_T(""));
+                ss.clear();
+            }
+        } else {
+            ss << c;
+        }
+    }
+
+    if (!ss.str().empty() || escape) {
+        result.push_back(ss.str());
+    }
+#endif
+    return result;
+}
 
 #if ENABLE_CPP_REGEX
 std::vector<std::pair<std::string, std::string>> createOptionList() {
@@ -6364,6 +6427,10 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         common->debugRawOut = true;
         return 0;
     }
+    if (IS_OPTION("offset-video-dts-advance")) {
+        common->offsetVideoDtsAdvance = true;
+        return 0;
+    }
     if (IS_OPTION("allow-other-negative-pts")) {
         common->allowOtherNegativePts = true;
         return 0;
@@ -6996,6 +7063,77 @@ int parse_one_ctrl_option(const TCHAR *option_name, const TCHAR *strInput[], int
     }
     if (IS_OPTION("enable-vulkan")) {
         ctrl->enableVulkan = true;
+        return 0;
+    }
+    if (IS_OPTION("parallel") && ENABLE_PARALLEL_ENC) {
+        if (i + 1 >= nArgNum || strInput[i + 1][0] == _T('-')) {
+            return 0;
+        }
+        i++;
+        const auto paramList = std::vector<std::string>{ "id" };
+        for (const auto &param : split(strInput[i], _T(","))) {
+            auto pos = param.find_first_of(_T("="));
+            if (pos != std::string::npos) {
+                auto param_arg = param.substr(0, pos);
+                auto param_val = param.substr(pos + 1);
+                param_arg = tolowercase(param_arg);
+                if (param_arg == _T("mp")) {
+                    if (param == _T("auto")) {
+                        ctrl->parallelEnc.parallelCount = -1;
+                    } else {
+                        try {
+                            ctrl->parallelEnc.parallelCount = std::stoi(param_val);
+                        } catch (...) {
+                            print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                            return 1;
+                        }
+                    }
+                    continue;
+                }
+                if (param_arg == _T("id")) {
+                    try {
+                        ctrl->parallelEnc.parallelId = std::stoi(param_val);
+                    } catch (...) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                        return 1;
+                    }
+                    continue;
+                }
+                if (param_arg == _T("chunks")) {
+                    try {
+                        ctrl->parallelEnc.chunks = std::stoi(param_val);
+                    } catch (...) {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
+                        return 1;
+                    }
+                    continue;
+                }
+                if (param_arg == _T("cache")) {
+                    int value = 0;
+                    if (get_list_value(list_parallel_enc_cache, param_val.c_str(), &value)) {
+                        ctrl->parallelEnc.cacheMode = (RGYParamParallelEncCache)value;
+                    } else {
+                        print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val, list_parallel_enc_cache);
+                        return 1;
+                    }
+                    continue;
+                }
+                print_cmd_error_unknown_opt_param(option_name, param_arg, paramList);
+                return 1;
+            } else {
+                if (param == _T("auto")) {
+                    ctrl->parallelEnc.parallelCount = -1;
+                } else {
+                    try {
+                        ctrl->parallelEnc.parallelCount = std::stoi(param);
+                    } catch (...) {
+                        print_cmd_error_invalid_value(tstring(option_name), param);
+                        return 1;
+                    }
+                }
+                continue;
+            }
+        }
         return 0;
     }
     if (IS_OPTION("process-monitor-dev-usage")) {
@@ -8291,6 +8429,7 @@ tstring gen_cmd(const RGYParamCommon *param, const RGYParamCommon *defaultPrm, b
             cmd << _T(" --vmaf ") << tmp.str().substr(1);
         }
     }
+    OPT_BOOL(_T("--offset-video-dts-advance"), _T(""), offsetVideoDtsAdvance);
     OPT_BOOL(_T("--allow-other-negative-pts"), _T(""), allowOtherNegativePts);
     OPT_BOOL(_T("--disable-av1-write-parser"), _T("--no-disable-av1-write-parser"), debugDirectAV1Out);
     OPT_BOOL(_T("--debug-raw-out"), _T("--no-debug-raw-out"), debugRawOut);
@@ -8395,6 +8534,17 @@ tstring gen_cmd(const RGYParamControl *param, const RGYParamControl *defaultPrm,
     OPT_BOOL(_T("--enable-vulkan"), _T("--disable-vulkan"), enableVulkan);
     OPT_BOOL(_T("--process-monitor-dev-usage"), _T(""), processMonitorDevUsage);
     OPT_BOOL(_T("--process-monitor-dev-usage-reset"), _T(""), processMonitorDevUsageReset);
+
+    if (param->parallelEnc != defaultPrm->parallelEnc) {
+        std::basic_stringstream<TCHAR> tmp;
+        tmp.str(tstring());
+        ADD_NUM(_T("mp"), parallelEnc.parallelCount);
+        ADD_NUM(_T("id"), parallelEnc.parallelId);
+        ADD_LST(_T("cache"), parallelEnc.cacheMode, list_parallel_enc_cache);
+        if (!tmp.str().empty()) {
+            cmd << _T(" --parallel ") << tmp.str().substr(1);
+        }
+    }
     return cmd.str();
 }
 
@@ -9422,6 +9572,9 @@ tstring gen_cmd_help_vpp() {
 
 tstring gen_cmd_help_ctrl() {
     tstring str = strsprintf(_T("\n")
+#if ENABLE_PARALLEL_ENC
+        _T("   --parallel <int> or auto     Enable parallel encoding by file splitting.\n")
+#endif
         _T("   --log <string>               set log file name\n")
         _T("   --log-level <string>         set log level\n")
         _T("                                  debug, info(default), warn, error, quiet\n")

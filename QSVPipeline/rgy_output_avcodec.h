@@ -125,6 +125,7 @@ struct AVMuxFormat {
     AVDictionary         *headerOptions;        //ヘッダオプション
     bool                  disableMp4Opt;        //mp4出力時のmuxの最適化(faststart)を無効にする
     bool                  lowlatency;           //低遅延モード
+    bool                  offsetVideoDtsAdvance; //映像の負のdtsを避ける (ts_output_offsetを使う)
     bool                  allowOtherNegativePts; //音声・字幕の負のptsを許可するかどうか
     bool                  timestampPassThrough;  //タイムスタンプをそのまま出力するかどうか
 
@@ -144,6 +145,7 @@ struct AVMuxVideo {
     int                   fpsBaseNextDts;       //出力映像のfpsベースでのdts (API v1.6以下でdtsが計算されない場合に使用する)
     std::unique_ptr<FILE, fp_deleter> fpTsLogFile; //mux timestampログファイル
     RGYBitstream          hdrBitstream;         //追加のsei nal
+    RGYHDR10Plus         *hdr10plus;          //追加のhdr10plus
     bool                  hdr10plusMetadataCopy; //hdr10plusをコピー
     RGYDOVIProfile        doviProfileSrc;       //dovi profile input
     RGYDOVIProfile        doviProfileDst;       //dovi profile output
@@ -372,10 +374,12 @@ struct AVOutputStreamPrm {
 struct AvcodecWriterPrm {
     const AVDictionary          *inputFormatMetadata;     //入力ファイルのグローバルメタデータ
     tstring                      outputFormat;            //出力のフォーマット
+    bool                         offsetVideoDtsAdvance;   //映像のdtsを進める (ts_output_offsetを使う)
     bool                         allowOtherNegativePts;   //音声・字幕の負のptsを許可するかどうか
     bool                         timestampPassThrough;    //タイムスタンプをそのまま出力するかどうか
     bool                         bVideoDtsUnavailable;    //出力映像のdtsが無効 (API v1.6以下)
-    bool                         lowlatency;              //低遅延モード 
+    bool                         lowlatency;              //低遅延モード
+    bool                         parallelEncode;          //並列エンコードを使用する
     const AVStream              *videoInputStream;        //入力映像のストリーム
     AVRational                   bitstreamTimebase;       //エンコーダのtimebase
     int64_t                      videoInputFirstKeyPts;   //入力映像の最初のpts
@@ -395,6 +399,7 @@ struct AvcodecWriterPrm {
     PerfQueueInfo               *queueInfo;               //キューの情報を格納する構造体
     tstring                      muxVidTsLogFile;         //mux timestampログファイル
     const RGYHDRMetadata        *hdrMetadataIn;           //HDR関連のmetadata
+    RGYHDR10Plus                *hdr10plus;                //追加のhdr10plus
     bool                         hdr10plusMetadataCopy;   //hdr10plusのmetadataをコピー
     DOVIRpu                     *doviRpu;                 //DOVIRpu
     bool                         doviRpuMetadataCopy;     //doviのmetadataのコピー
@@ -415,10 +420,12 @@ struct AvcodecWriterPrm {
     AvcodecWriterPrm() :
         inputFormatMetadata(nullptr),
         outputFormat(),
+        offsetVideoDtsAdvance(false),
         allowOtherNegativePts(false),
         timestampPassThrough(false),
         bVideoDtsUnavailable(),
         lowlatency(false),
+        parallelEncode(false),
         videoInputStream(nullptr),
         bitstreamTimebase(av_make_q(0, 1)),
         videoInputFirstKeyPts(0),
@@ -438,6 +445,7 @@ struct AvcodecWriterPrm {
         queueInfo(nullptr),
         muxVidTsLogFile(),
         hdrMetadataIn(nullptr),
+        hdr10plus(nullptr),
         hdr10plusMetadataCopy(false),
         doviRpu(nullptr),
         doviRpuMetadataCopy(false),

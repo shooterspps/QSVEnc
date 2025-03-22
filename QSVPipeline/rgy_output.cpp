@@ -30,6 +30,7 @@
 #include "rgy_bitstream.h"
 #include "rgy_language.h"
 #include "convert_csp.h"
+#include "rgy_parallel_enc.h"
 #include <filesystem>
 #if defined(_M_IX86) || defined(_M_X64) || defined(__x86_64)
 #include <smmintrin.h>
@@ -340,7 +341,7 @@ std::pair<RGY_ERR, std::vector<uint8_t>> RGYOutput::getMetadata(const RGYFrameDa
             AddMessage(RGY_LOG_ERROR, _T("Invalid cast to %s metadata.\n"));
             return { RGY_ERR_UNSUPPORTED, metadata };
         }
-        if (auto sts = frameDataPtr->convert(convPrm); sts != RGY_ERR_NONE) {
+        if (auto sts = frameDataPtr->convert(convPrm, m_printMes.get()); sts != RGY_ERR_NONE) {
             AddMessage(RGY_LOG_ERROR, _T("Failed to convert metadata: %s.\n"), get_err_mes(sts));
             return { sts, metadata };
         }
@@ -422,7 +423,7 @@ RGY_ERR RGYOutput::InsertMetadata(RGYBitstream *bitstream, std::vector<std::uniq
         bitstream->setOffset(0);
         if (!header_check) {
             for (auto& metadata : metadataList) {
-                if (!metadata->written && !metadata->appendix) {
+                if (!metadata->written && metadata->pos == RGYOutputInsertMetadataPosition::Prefix) {
                     bitstream->append(metadata->mdata.data(), metadata->mdata.size());
                     metadata->written = true;
                 }
@@ -434,7 +435,7 @@ RGY_ERR RGYOutput::InsertMetadata(RGYBitstream *bitstream, std::vector<std::uniq
                 if (i + 1 < (int)nal_list.size()
                     && (nal_list[i + 1].type != NALU_HEVC_VPS && nal_list[i + 1].type != NALU_HEVC_SPS && nal_list[i + 1].type != NALU_HEVC_PPS)) {
                     for (auto& metadata : metadataList) {
-                        if (!metadata->written && !metadata->appendix) {
+                        if (!metadata->written && metadata->pos == RGYOutputInsertMetadataPosition::Prefix) {
                             bitstream->append(metadata->mdata.data(), metadata->mdata.size());
                             metadata->written = true;
                         }
@@ -443,7 +444,7 @@ RGY_ERR RGYOutput::InsertMetadata(RGYBitstream *bitstream, std::vector<std::uniq
             }
         }
         for (auto& metadata : metadataList) {
-            if (!metadata->written && metadata->appendix) {
+            if (!metadata->written && metadata->pos == RGYOutputInsertMetadataPosition::Appendix) {
                 bitstream->append(metadata->mdata.data(), metadata->mdata.size());
                 metadata->written = true;
             }
@@ -472,20 +473,37 @@ RGY_ERR RGYOutput::InsertMetadata(RGYBitstream *bitstream, std::vector<std::uniq
 
         if (!has_seq_header && !has_td) {
             for (auto& metadata : metadataList) {
-                if (!metadata->written && !metadata->appendix) {
+                if (!metadata->written && metadata->pos == RGYOutputInsertMetadataPosition::Prefix) {
                     bitstream->append(metadata->mdata.data(), metadata->mdata.size());
                     metadata->written = true;
                 }
             }
         }
 
-        for (size_t i = 0; i < av1_units.size(); i++) {
+        //最後のFRAME/FRAME_HEADER OBUの位置
+        int lastFrameIdx = -1;
+        for (int i = (int)av1_units.size()-1; i >= 0; i--) {
+            if (av1_units[i]->type == OBU_FRAME || av1_units[i]->type == OBU_FRAME_HEADER) {
+                lastFrameIdx = i;
+                break;
+            }
+        }
+
+        for (int i = 0; i < (int)av1_units.size(); i++) {
+            if (i == lastFrameIdx) {
+                for (auto& metadata : metadataList) {
+                    if (!metadata->written && metadata->pos == RGYOutputInsertMetadataPosition::FrontOfLastFrame) {
+                        bitstream->append(metadata->mdata.data(), metadata->mdata.size());
+                        metadata->written = true;
+                    }
+                }
+            }
             bitstream->append(av1_units[i]->unit_data.data(), av1_units[i]->unit_data.size());
             if (av1_units[i]->type == OBU_TEMPORAL_DELIMITER || av1_units[i]->type == OBU_SEQUENCE_HEADER) {
-                if (i + 1 < av1_units.size()
+                if (i + 1 < (int)av1_units.size()
                     && (av1_units[i + 1]->type != OBU_TEMPORAL_DELIMITER && av1_units[i + 1]->type != OBU_SEQUENCE_HEADER)) {
                     for (auto& metadata : metadataList) {
-                        if (!metadata->written && !metadata->appendix) {
+                        if (!metadata->written && metadata->pos == RGYOutputInsertMetadataPosition::Prefix) {
                             bitstream->append(metadata->mdata.data(), metadata->mdata.size());
                             metadata->written = true;
                         }
@@ -494,7 +512,7 @@ RGY_ERR RGYOutput::InsertMetadata(RGYBitstream *bitstream, std::vector<std::uniq
             }
         }
         for (auto& metadata : metadataList) {
-            if (!metadata->written && metadata->appendix) {
+            if (!metadata->written && metadata->pos == RGYOutputInsertMetadataPosition::Appendix) {
                 bitstream->append(metadata->mdata.data(), metadata->mdata.size());
                 metadata->written = true;
             }
@@ -631,6 +649,7 @@ RGY_ERR RGYOutputBSF::applyBitstreamFilter(RGYBitstream *bitstream) {
 RGYOutputRaw::RGYOutputRaw() :
     m_outputBuf2(),
     m_hdrBitstream(),
+    m_hdr10plus(nullptr),
     m_hdr10plusMetadataCopy(false),
     m_doviProfileDst(RGY_DOVI_PROFILE_UNSET),
     m_doviRpu(nullptr),
@@ -639,12 +658,19 @@ RGYOutputRaw::RGYOutputRaw() :
     m_timestamp(nullptr),
     m_prevInputFrameId(-1),
     m_prevEncodeFrameId(-1),
-    m_debugDirectAV1Out(false) {
+    m_debugDirectAV1Out(false),
+    m_extPERaw(false),
+    m_qFirstProcessData(nullptr),
+    m_qFirstProcessDataFree(nullptr) {
     m_strWriterName = _T("bitstream");
     m_OutType = OUT_TYPE_BITSTREAM;
 }
 
 RGYOutputRaw::~RGYOutputRaw() {
+    if (m_qFirstProcessData) {
+        m_qFirstProcessData->push(nullptr);
+        m_qFirstProcessData = nullptr;
+    }
     if (m_fpDebug) {
         m_fpDebug.reset();
     }
@@ -664,7 +690,9 @@ RGY_ERR RGYOutputRaw::Init(const TCHAR *strFileName, const VideoInfo *pVideoOutp
         m_noOutput = true;
         AddMessage(RGY_LOG_DEBUG, _T("no output for benchmark mode.\n"));
     } else {
-        if (_tcscmp(strFileName, _T("-")) == 0) {
+        if (rawPrm->qFirstProcessData) {
+            AddMessage(RGY_LOG_DEBUG, _T("using parallel queue\n"));
+        } else if (_tcscmp(strFileName, _T("-")) == 0) {
             m_fDest.reset(stdout);
             m_outputIsStdout = true;
             AddMessage(RGY_LOG_DEBUG, _T("using stdout\n"));
@@ -706,7 +734,12 @@ RGY_ERR RGYOutputRaw::Init(const TCHAR *strFileName, const VideoInfo *pVideoOutp
                 return RGY_ERR_UNSUPPORTED;
             }
         }
+        m_extPERaw = rawPrm->extPERaw;
+        m_qFirstProcessData = rawPrm->qFirstProcessData;
+        m_qFirstProcessDataFree = rawPrm->qFirstProcessDataFree;
+        m_qFirstProcessDataFreeLarge = rawPrm->qFirstProcessDataFreeLarge;
         m_hdr10plusMetadataCopy = rawPrm->hdr10plusMetadataCopy;
+        m_hdr10plus = rawPrm->hdr10plus;
         m_doviProfileDst = rawPrm->doviProfile;
         m_doviRpu = rawPrm->doviRpu;
         m_doviRpuMetadataCopy = rawPrm->doviRpuMetadataCopy;
@@ -785,7 +818,6 @@ RGY_ERR RGYOutputRaw::WriteNextFrame(RGYBitstream *pBitstream) {
 }
 
 RGY_ERR RGYOutputRaw::WriteNextOneFrame(RGYBitstream *pBitstream) {
-    size_t nBytesWritten = 0;
     if (m_noOutput) {
         return RGY_ERR_NONE;
     }
@@ -813,15 +845,19 @@ RGY_ERR RGYOutputRaw::WriteNextOneFrame(RGYBitstream *pBitstream) {
     std::vector<std::unique_ptr<RGYOutputInsertMetadata>> metadataList;
     if (m_hdrBitstream.size() > 0) {
         std::vector<uint8_t> data(m_hdrBitstream.data(), m_hdrBitstream.data() + m_hdrBitstream.size());
-        metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(data, (m_VideoOutputInfo.codec == RGY_CODEC_AV1) ? false : true, false));
+        metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(data, true, RGYOutputInsertMetadataPosition::Prefix));
     }
-    if (m_hdr10plusMetadataCopy) {
+    if (m_hdr10plus) {
+        if (auto data = m_hdr10plus->getData(bs_framedata.inputFrameId, m_VideoOutputInfo.codec); data.size() > 0) {
+            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(data, false, RGYOutputInsertMetadata::dhdr10plus_pos(m_VideoOutputInfo.codec)));
+        }
+    } else if (m_hdr10plusMetadataCopy) {
         auto [err_hdr10plus, metadata_hdr10plus] = getMetadata<RGYFrameDataHDR10plus>(RGY_FRAME_DATA_HDR10PLUS, bs_framedata, nullptr);
         if (err_hdr10plus != RGY_ERR_NONE) {
             return err_hdr10plus;
         }
         if (metadata_hdr10plus.size() > 0) {
-            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(metadata_hdr10plus, false, false));
+            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(metadata_hdr10plus, false, RGYOutputInsertMetadata::dhdr10plus_pos(m_VideoOutputInfo.codec)));
         }
     }
     if (m_doviRpu) {
@@ -830,7 +866,7 @@ RGY_ERR RGYOutputRaw::WriteNextOneFrame(RGYBitstream *pBitstream) {
             AddMessage(RGY_LOG_ERROR, _T("Failed to get dovi rpu for %lld.\n"), bs_framedata.inputFrameId);
         }
         if (dovi_nal.size() > 0) {
-            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(dovi_nal, false, m_VideoOutputInfo.codec == RGY_CODEC_HEVC ? true : false));
+            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(dovi_nal, false, RGYOutputInsertMetadata::dovirpu_pos(m_VideoOutputInfo.codec)));
         }
     } else if (m_doviRpuMetadataCopy) {
         auto doviRpuConvPrm = std::make_unique<RGYFrameDataDOVIRpuConvertParam>(m_doviProfileDst, m_doviRpuConvertParam);
@@ -839,7 +875,7 @@ RGY_ERR RGYOutputRaw::WriteNextOneFrame(RGYBitstream *pBitstream) {
             return err_dovirpu;
         }
         if (metadata_dovi_rpu.size() > 0) {
-            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(metadata_dovi_rpu, false, m_VideoOutputInfo.codec == RGY_CODEC_HEVC ? true : false));
+            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(metadata_dovi_rpu, false, RGYOutputInsertMetadata::dovirpu_pos(m_VideoOutputInfo.codec)));
         }
     }
 
@@ -848,8 +884,52 @@ RGY_ERR RGYOutputRaw::WriteNextOneFrame(RGYBitstream *pBitstream) {
         return err;
     }
 
-    nBytesWritten = _fwrite_nolock(pBitstream->data(), 1, pBitstream->size(), m_fDest.get());
-    WRITE_CHECK(nBytesWritten, pBitstream->size());
+    size_t nBytesWritten = 0;
+    if (m_qFirstProcessData || m_extPERaw) {
+        RGYOutputRawPEExtHeader peHeader;
+        peHeader.pts = pBitstream->pts();
+        peHeader.dts = pBitstream->dts();
+        peHeader.duration = (ENCODER_QSV) ? bs_framedata.duration : pBitstream->duration(); // QSVではdurationを取得できないので、別途取得する
+        peHeader.frameType = pBitstream->frametype();
+        peHeader.picstruct = pBitstream->picstruct();
+        peHeader.inputFrameIdx = bs_framedata.inputFrameId;
+        peHeader.encodeFrameIdx = bs_framedata.encodeFrameId;
+        peHeader.flags = pBitstream->dataflag();
+        peHeader.size = pBitstream->size();
+        if (m_qFirstProcessData) { // 並列エンコード用のキューが指定されている場合は、ファイル出力せず、キューにデータを渡す
+            RGYOutputRawPEExtHeader *ptr = nullptr;
+            //空きポインタを保持するキューから取得
+            RGYQueueMPMP<RGYOutputRawPEExtHeader*> *freeQueue = (sizeof(peHeader) + pBitstream->size() <= RGY_PE_EXT_HEADER_DATA_NORMAL_BUF_SIZE) ? m_qFirstProcessDataFree : m_qFirstProcessDataFreeLarge;
+            if (!freeQueue->front_copy_and_pop_no_lock(&ptr)) {
+                ptr = nullptr;
+            }
+            auto allocSize = (ptr) ? ptr->allocSize : 0;
+            // 実際のサイズか、RGY_PE_EXT_HEADER_DATA_BUF_SIZEの大きい方のサイズで確保
+            const auto newAllocSize = std::max(sizeof(peHeader) + pBitstream->size(), RGY_PE_EXT_HEADER_DATA_NORMAL_BUF_SIZE);
+            if (ptr == nullptr || ptr->allocSize < newAllocSize) {
+                if (ptr) free(ptr);
+                ptr = (RGYOutputRawPEExtHeader *)malloc(newAllocSize);
+                if (ptr == nullptr) {
+                    AddMessage(RGY_LOG_ERROR, _T("failed to allocate memory for parallel encoding header.\n"));
+                    return RGY_ERR_NULL_PTR;
+                }
+                allocSize = newAllocSize;
+            }
+            memcpy(ptr, &peHeader, sizeof(peHeader));
+            memcpy(ptr + 1, pBitstream->data(), pBitstream->size());
+            ptr->allocSize = allocSize; // allocsizeはpeHeaderで上書きされているので、ここで再設定
+            m_qFirstProcessData->push(ptr);
+            nBytesWritten += pBitstream->size();
+        } else {
+            auto ret = _fwrite_nolock(&peHeader, 1, sizeof(peHeader), m_fDest.get());
+            WRITE_CHECK(ret, sizeof(peHeader));
+        }
+    }
+    if (!m_qFirstProcessData) {
+        const auto dataSize = _fwrite_nolock(pBitstream->data(), 1, pBitstream->size(), m_fDest.get());
+        WRITE_CHECK(dataSize, pBitstream->size());
+        nBytesWritten += dataSize;
+    }
 
     m_encSatusInfo->SetOutputData(pBitstream->frametype(), nBytesWritten, 0);
     pBitstream->setSize(0);
@@ -1160,6 +1240,7 @@ RGY_ERR initWriters(
     const vector<unique_ptr<AVChapter>>& chapters,
 #endif //#if ENABLE_AVSW_READER
     const RGYHDRMetadata *hdrMetadataIn,
+    RGYHDR10Plus *hdr10plus,
     DOVIRpu *doviRpu,
     RGYTimestamp *vidTimestamp,
     const bool videoDtsUnavailable,
@@ -1198,17 +1279,23 @@ RGY_ERR initWriters(
     //if (inputParams->CodecId == MFX_CODEC_RAW) {
     //    inputParams->AVMuxTarget &= ~RGY_MUX_VIDEO;
     //}
-    pStatus->Init(outputVideoInfo.fpsN, outputVideoInfo.fpsD, input->frames, inputFileDuration, trimParam, log, pPerfMonitor);
+    auto encSts = (ctrl->parallelEnc.sendData) ? &ctrl->parallelEnc.sendData->encStatus : nullptr;
+    pStatus->Init(outputVideoInfo.fpsN, outputVideoInfo.fpsD, input->frames, inputFileDuration, trimParam, log, pPerfMonitor, encSts);
     if (ctrl->perfMonitorSelect || ctrl->perfMonitorSelectMatplot) {
         pPerfMonitor->SetEncStatus(pStatus);
     }
 
     bool audioCopyAll = false;
     if (common->AVMuxTarget & RGY_MUX_VIDEO) {
+        if (ctrl->parallelEnc.isChild()) {
+            log->write(RGY_LOG_ERROR, RGY_LOGT_OUT, _T("Output: child process should not use muxer.\n"));
+            return RGY_ERR_UNSUPPORTED;
+        }
         log->write(RGY_LOG_DEBUG, RGY_LOGT_OUT, _T("Output: Using avformat writer.\n"));
         pFileWriter = std::make_shared<RGYOutputAvcodec>();
         AvcodecWriterPrm writerPrm;
         writerPrm.outputFormat            = common->muxOutputFormat;
+        writerPrm.offsetVideoDtsAdvance   = common->offsetVideoDtsAdvance;
         writerPrm.allowOtherNegativePts   = common->allowOtherNegativePts;
         writerPrm.timestampPassThrough    = common->timestampPassThrough;
         writerPrm.trimList                = trimParam.list;
@@ -1226,7 +1313,8 @@ RGY_ERR initWriters(
         writerPrm.chapterNoTrim           = common->chapterNoTrim;
         writerPrm.attachments             = common->attachmentSource;
         writerPrm.hdrMetadataIn           = hdrMetadataIn;
-        writerPrm.hdr10plusMetadataCopy   = common->hdr10plusMetadataCopy || common->dynamicHdr10plusJson.length() > 0;
+        writerPrm.hdr10plus               = hdr10plus;
+        writerPrm.hdr10plusMetadataCopy   = common->hdr10plusMetadataCopy;
         writerPrm.doviRpu                 = doviRpu;
         writerPrm.doviRpuMetadataCopy     = common->doviRpuMetadataCopy;
         writerPrm.doviProfile             = common->doviProfile;
@@ -1238,6 +1326,7 @@ RGY_ERR initWriters(
         writerPrm.afs                     = isAfs;
         writerPrm.disableMp4Opt           = common->disableMp4Opt;
         writerPrm.lowlatency              = ctrl->lowLatency;
+        writerPrm.parallelEncode          = ctrl->parallelEnc.isEnabled();
         writerPrm.debugDirectAV1Out       = common->debugDirectAV1Out;
         writerPrm.HEVCAlphaChannel        = HEVCAlphaChannel;
         writerPrm.HEVCAlphaChannelMode    = HEVCAlphaChannelMode;
@@ -1541,7 +1630,8 @@ RGY_ERR initWriters(
             rawPrm.benchmark = benchmark;
             rawPrm.codecId = outputVideoInfo.codec;
             rawPrm.hdrMetadataIn = hdrMetadataIn;
-            rawPrm.hdr10plusMetadataCopy = common->hdr10plusMetadataCopy || common->dynamicHdr10plusJson.length() > 0;
+            rawPrm.hdr10plus = hdr10plus;
+            rawPrm.hdr10plusMetadataCopy = common->hdr10plusMetadataCopy;
             rawPrm.doviProfile = common->doviProfile;
             rawPrm.doviRpu = doviRpu;
             rawPrm.doviRpuMetadataCopy = common->doviRpuMetadataCopy;
@@ -1550,6 +1640,10 @@ RGY_ERR initWriters(
             rawPrm.debugDirectAV1Out = common->debugDirectAV1Out;
             rawPrm.HEVCAlphaChannel = HEVCAlphaChannel;
             rawPrm.HEVCAlphaChannelMode = HEVCAlphaChannelMode;
+            rawPrm.qFirstProcessData = (ctrl->parallelEnc.sendData) ? ctrl->parallelEnc.sendData->qFirstProcessData : nullptr;
+            rawPrm.qFirstProcessDataFree = (ctrl->parallelEnc.sendData) ? ctrl->parallelEnc.sendData->qFirstProcessDataFree : nullptr;
+            rawPrm.qFirstProcessDataFreeLarge = (ctrl->parallelEnc.sendData) ? ctrl->parallelEnc.sendData->qFirstProcessDataFreeLarge : nullptr;
+            rawPrm.extPERaw = ctrl->parallelEnc.isChild();
             rawPrm.debugRawOut = common->debugRawOut;
             rawPrm.outReplayFile = common->outReplayFile;
             rawPrm.outReplayCodec = common->outReplayCodec;

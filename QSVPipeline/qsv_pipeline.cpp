@@ -635,6 +635,17 @@ RGY_ERR CQSVPipeline::InitMfxEncodeParams(sInputParams *pInParams, std::vector<s
     }
     m_dynamicRC = pInParams->dynamicRC;
 
+    // 並列エンコード時のチェック
+    if (pInParams->ctrl.parallelEnc.isEnabled()) {
+        pInParams->hyperMode = MFX_HYPERMODE_OFF; // 並列エンコード時はHyperModeは使用しない
+        for (auto& dev2 : devList) {
+            if (dev2) {
+                const auto dev2Feature = dev2->getEncodeFeature(pInParams->rcParam.encMode, pInParams->codec, pInParams->functionMode == QSVFunctionMode::FF);
+                availableFeaures &= dev2Feature;
+            }
+        }
+    }
+
     // HyperModeがらみのチェック
     if (pInParams->hyperMode != MFX_HYPERMODE_OFF) {
         if (!(availableFeaures & ENC_FEATURE_HYPER_MODE)) {
@@ -1084,7 +1095,7 @@ RGY_ERR CQSVPipeline::InitMfxEncodeParams(sInputParams *pInParams, std::vector<s
             m_encParams.cop2.MaxFrameSize = (decltype(m_encParams.cop2.MaxFrameSize))pInParams->maxFrameSize;
         }
         if (check_lib_version(m_mfxVer, MFX_LIB_VERSION_1_8)) {
-            if (m_hdr10plus || m_hdr10plusMetadataCopy || m_dovirpu || pInParams->common.doviProfile != 0 || (m_hdrseiOut && m_hdrseiOut->gen_nal().size() > 0)) {
+            if (m_hdr10plus || m_hdr10plusMetadataCopy || m_dovirpu || pInParams->common.doviProfile != 0 || (m_hdrseiOut && m_hdrseiOut->gen_nal().size() > 0) || m_parallelEnc) {
                 m_encParams.cop2.RepeatPPS = MFX_CODINGOPTION_ON;
             } else if (pInParams->repeatHeaders.has_value()) {
                 m_encParams.cop2.RepeatPPS = (mfxU16)((pInParams->repeatHeaders.value()) ? MFX_CODINGOPTION_ON : MFX_CODINGOPTION_OFF);
@@ -1098,8 +1109,12 @@ RGY_ERR CQSVPipeline::InitMfxEncodeParams(sInputParams *pInParams, std::vector<s
         for (int i = 0; i < 3; i++) {
             pInParams->qpMin.qp(i) = clamp_param_int(pInParams->qpMin.qp(i), 0, codecMaxQP, _T("qp min"));
             pInParams->qpMax.qp(i) = clamp_param_int(pInParams->qpMax.qp(i), 0, codecMaxQP, _T("qp max"));
-            const int qpMin = (std::min)(pInParams->qpMin.qp(i), pInParams->qpMax.qp(i));
-            const int qpMax = (std::max)(pInParams->qpMin.qp(i), pInParams->qpMax.qp(i));
+            int qpMin = pInParams->qpMin.qp(i);
+            int qpMax = pInParams->qpMax.qp(i);
+            if (pInParams->qpMin.qp(i) > 0 && pInParams->qpMax.qp(i) > 0) {
+                qpMin = (std::min)(qpMin, pInParams->qpMax.qp(i));
+                qpMax = (std::max)(qpMax, pInParams->qpMin.qp(i));
+            }
             pInParams->qpMin.qp(i) = (pInParams->qpMin.qp(i) == 0) ? 0 : qpMin;
             pInParams->qpMax.qp(i) = (pInParams->qpMax.qp(i) == 0) ? 0 : qpMax;
         }
@@ -1636,9 +1651,11 @@ RGY_ERR CQSVPipeline::AllocFrames() {
 CQSVPipeline::CQSVPipeline() :
     m_mfxVer({ 0 }),
     m_device(),
+    m_devNames(),
     m_pStatus(),
     m_pPerfMonitor(),
     m_deviceUsage(),
+    m_parallelEnc(),
     m_encWidth(0),
     m_encHeight(0),
     m_encPicstruct(RGY_PICSTRUCT_UNKNOWN),
@@ -1818,7 +1835,7 @@ RGY_ERR CQSVPipeline::InitOutput(sInputParams *inputParams) {
 #if ENABLE_AVSW_READER
         m_Chapters,
 #endif //#if ENABLE_AVSW_READER
-        m_hdrseiOut.get(), m_dovirpu.get(), m_encTimestamp.get(),
+        m_hdrseiOut.get(), m_hdr10plus.get(), m_dovirpu.get(), m_encTimestamp.get(),
         !check_lib_version(m_mfxVer, MFX_LIB_VERSION_1_6),
         inputParams->bBenchmark, false, 0,
         m_poolPkt.get(), m_poolFrame.get(),
@@ -1849,7 +1866,7 @@ DeviceCodecCsp CQSVPipeline::getHWDecCodecCsp(const bool skipHWDecodeCheck, std:
 
 RGY_ERR CQSVPipeline::InitInput(sInputParams *inputParam, DeviceCodecCsp& HWDecCodecCsp) {
 #if ENABLE_RAW_READER
-    m_pStatus.reset(new EncodeStatus());
+    m_pStatus = std::make_shared<EncodeStatus>();
 
     int subburnTrackId = 0;
     for (const auto &subburn : inputParam->vpp.subburn) {
@@ -1975,9 +1992,10 @@ RGY_ERR CQSVPipeline::InitInput(sInputParams *inputParam, DeviceCodecCsp& HWDecC
         if (!ENCODER_QSV) {
             m_nAVSyncMode |= RGY_AVSYNC_VFR;
             const auto timebaseStreamIn = to_rgy(pAVCodecReader->GetInputVideoStream()->time_base);
-            if ((timebaseStreamIn.inv() * m_inputFps.inv()).d() == 1 || timebaseStreamIn.n() > 1000) { //fpsを割り切れるtimebaseなら
+            if (!inputParam->common.timebase.is_valid()
+                && ((timebaseStreamIn.inv() * m_inputFps.inv()).d() == 1 || timebaseStreamIn.n() > 1000)) { //fpsを割り切れるtimebaseなら
                 if (!inputParam->vpp.afs.enable && !inputParam->vpp.rff.enable) {
-                    m_outputTimebase = m_inputFps.inv() * rgy_rational<int>(1, 8);
+                    m_outputTimebase = m_inputFps.inv() * rgy_rational<int>(1, 4);
                 }
             }
         }
@@ -3393,7 +3411,7 @@ RGY_ERR CQSVPipeline::deviceAutoSelect(const sInputParams *prm, std::vector<std:
         }
     }
 #if ENABLE_PERF_COUNTER
-    PrintMes(RGY_LOG_INFO, _T("Auto select device from %d devices.\n"), (int)gpuList.size());
+    PrintMes(RGY_LOG_DEBUG, _T("Auto select device from %d devices.\n"), (int)gpuList.size());
     bool counterIsIntialized = m_pPerfMonitor->isPerfCounterInitialized();
     for (int i = 0; i < 4 && !counterIsIntialized; i++) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -3433,7 +3451,7 @@ RGY_ERR CQSVPipeline::deviceAutoSelect(const sInputParams *prm, std::vector<std:
         double usage_score = 100.0 * (maxDeviceUsageCount - deviceUsageCount) / (double)maxDeviceUsageCount;
 
         gpuscore[gpu->deviceNum()] = usage_score + cc_score + ve_score + gpu_score + core_score + cl_score;
-        PrintMes(RGY_LOG_INFO, _T("GPU #%d (%s) score: %.1f: Use: %.1f, VE %.1f, GPU %.1f, CC %.1f, Core %.1f, CL %.1f.\n"), gpu->deviceNum(), gpu->name().c_str(),
+        PrintMes(RGY_LOG_DEBUG, _T("GPU #%d (%s) score: %.1f: Use: %.1f, VE %.1f, GPU %.1f, CC %.1f, Core %.1f, CL %.1f.\n"), gpu->deviceNum(), gpu->name().c_str(),
             gpuscore[gpu->deviceNum()], usage_score, ve_score, gpu_score, cc_score, core_score, cl_score);
     }
     std::sort(gpuList.begin(), gpuList.end(), [&](const std::unique_ptr<QSVDevice> &a, const std::unique_ptr<QSVDevice> &b) {
@@ -3443,9 +3461,9 @@ RGY_ERR CQSVPipeline::deviceAutoSelect(const sInputParams *prm, std::vector<std:
         return a->deviceNum() < b->deviceNum();
         });
 
-    PrintMes(RGY_LOG_INFO, _T("GPU Priority\n"));
+    PrintMes(RGY_LOG_DEBUG, _T("GPU Priority\n"));
     for (const auto &gpu : gpuList) {
-        PrintMes(RGY_LOG_INFO, _T("GPU #%d (%s): score %.1f\n"), gpu->deviceNum(), gpu->name().c_str(), gpuscore[gpu->deviceNum()]);
+        PrintMes(RGY_LOG_DEBUG, _T("GPU #%d (%s): score %.1f\n"), gpu->deviceNum(), gpu->name().c_str(), gpuscore[gpu->deviceNum()]);
     }
     return RGY_ERR_NONE;
 }
@@ -3581,14 +3599,27 @@ RGY_ERR CQSVPipeline::InitPowerThrottoling(sInputParams *pParams) {
     if (filterOpenCL > 0) {
         score_filter -= 1;
     }
+    const int parallelMul = (pParams->ctrl.parallelEnc.isEnabled()) ? pParams->ctrl.parallelEnc.parallelCount : 1;
     const bool speedLimit = pParams->ctrl.procSpeedLimit > 0 && pParams->ctrl.procSpeedLimit <= 240;
-    const int score = (speedLimit) ? 0 : score_codec + score_resolution + score_tu + score_filter;
+    const int score = (speedLimit) ? 0 : (score_codec + score_resolution + score_tu + score_filter) * parallelMul;
 
     //一定以上のスコアなら、throttolingをAuto、それ以外はthrottolingを有効にして消費電力を削減
     const int score_threshold = 7;
     const auto mode = (score >= score_threshold) ? RGYThreadPowerThrottlingMode::Auto : RGYThreadPowerThrottlingMode::Enabled;
-    PrintMes(RGY_LOG_DEBUG, _T("selected mode %s : score %d: codec %d, resolution %d, tu %d, filter %d, speed limit %s.\n"),
-        rgy_thread_power_throttoling_mode_to_str(mode), score, score_codec, score_resolution, score_tu, score_filter, speedLimit ? _T("on") : _T("off"));
+    PrintMes(RGY_LOG_DEBUG, _T("selected mode %s : score %d: codec %d, resolution %d, tu %d, filter %d, speed limit %s, parallelMul: %d.\n"),
+        rgy_thread_power_throttoling_mode_to_str(mode), score, score_codec, score_resolution, score_tu, score_filter, speedLimit ? _T("on") : _T("off"), parallelMul);
+
+    if (pParams->ctrl.parallelEnc.isEnabled()) {
+        // 並列エンコード時には音声スレッドと出力スレッドが重要なので、throttolingを有効にはならないように
+        auto& target = pParams->ctrl.threadParams.get(RGYThreadType::AUDIO);
+        if (target.throttling == RGYThreadPowerThrottlingMode::Unset) {
+            target.throttling = RGYThreadPowerThrottlingMode::Auto;
+        }
+        target = pParams->ctrl.threadParams.get(RGYThreadType::OUTPUT);
+        if (target.throttling == RGYThreadPowerThrottlingMode::Unset) {
+            target.throttling = RGYThreadPowerThrottlingMode::Auto;
+        }
+    }
 
     //Unsetのままの設定について自動決定したモードを適用
     for (int i = (int)RGYThreadType::ALL + 1; i < (int)RGYThreadType::END; i++) {
@@ -3649,6 +3680,9 @@ RGY_ERR CQSVPipeline::InitAvoidIdleClock(const sInputParams *pParams) {
 RGY_ERR CQSVPipeline::InitLog(sInputParams *pParams) {
     //ログの初期化
     m_pQSVLog.reset(new RGYLog(pParams->ctrl.logfile.c_str(), pParams->ctrl.loglevel, pParams->ctrl.logAddTime));
+    if (pParams->ctrl.parallelEnc.isChild() && pParams->ctrl.parallelEnc.sendData) {
+        m_pQSVLog->setLock(pParams->ctrl.parallelEnc.sendData->logMutex);
+    }
     if ((pParams->ctrl.logfile.length() > 0 || pParams->common.outputFilename.length() > 0) && pParams->input.type != RGY_INPUT_FMT_SM) {
         m_pQSVLog->writeFileHeader(pParams->common.outputFilename.c_str());
     }
@@ -3673,6 +3707,57 @@ RGY_ERR CQSVPipeline::InitPerfMonitor(const sInputParams *inputParam) {
         m_pQSVLog, &perfMonitorPrm)) {
         PrintMes(RGY_LOG_WARN, _T("Failed to initialize performance monitor, disabled.\n"));
         m_pPerfMonitor.reset();
+    }
+    return RGY_ERR_NONE;
+}
+
+RGY_ERR CQSVPipeline::InitParallelEncode(sInputParams *inputParam, const int maxEncoders) {
+    if (!inputParam->ctrl.parallelEnc.isEnabled()) {
+        return RGY_ERR_NONE;
+    }
+    const bool isChild = inputParam->ctrl.parallelEnc.isChild();
+    auto [sts, errmes] = RGYParallelEnc::isParallelEncPossible(inputParam, m_pFileReader.get());
+    if (sts != RGY_ERR_NONE) {
+        PrintMes(RGY_LOG_WARN, _T("%s"), errmes);
+        inputParam->ctrl.parallelEnc.parallelCount = 0;
+        inputParam->ctrl.parallelEnc.parallelId = -1;
+        return (isChild) ? sts : RGY_ERR_NONE; // 子スレッド側でエラーが起こった場合はエラー、親の場合は正常終了(並列動作を無効化して継続)を返す
+    }
+    // 並列処理が有効の場合、メインスレッドではエンコードは行わないので、m_deviceUsageは解放する
+    if (inputParam->ctrl.parallelEnc.isParent() && m_deviceUsage) {
+        m_deviceUsage->close();
+    }
+    if (inputParam->ctrl.parallelEnc.isParent()) {
+        // とんでもなく大きい値にする人がいそうなので、適当に制限する
+        const int maxParallelCount = std::max(4, maxEncoders * 2);
+        if (inputParam->ctrl.parallelEnc.parallelCount < 0) {
+            inputParam->ctrl.parallelEnc.parallelCount = maxEncoders;
+            PrintMes(RGY_LOG_DEBUG, _T("parallelCount set to %d\n"), inputParam->ctrl.parallelEnc.parallelCount);
+        } else if (inputParam->ctrl.parallelEnc.parallelCount > maxParallelCount) {
+            inputParam->ctrl.parallelEnc.parallelCount = maxParallelCount;
+            PrintMes(RGY_LOG_WARN, _T("Parallel count limited to %d\n"), inputParam->ctrl.parallelEnc.parallelCount);
+        }
+    }
+    m_parallelEnc = std::make_unique<RGYParallelEnc>(m_pQSVLog);
+    if ((sts = m_parallelEnc->parallelRun(inputParam, m_pFileReader.get(), m_outputTimebase, m_pStatus.get())) != RGY_ERR_NONE) {
+        if (inputParam->ctrl.parallelEnc.isChild()) {
+            return sts; // 子スレッド側でエラーが起こった場合はエラー
+        }
+        // うまくいかなかった場合、並列処理を無効化して続行する
+        PrintMes(RGY_LOG_WARN, _T("Failed to initialize parallel encoding, disabled.\n"));
+        m_parallelEnc.reset();
+        // m_deviceUsageはいったん解放したので、登録を再追加
+        if (m_deviceUsage) {
+            m_deviceUsage = std::make_unique<RGYDeviceUsage>();
+            auto devUsageLock = m_deviceUsage->lock(); // ロックは親プロセス側でとる
+            // 登録を解除するプロセスを起動
+            const auto [err_run_proc, child_pid] = m_deviceUsage->startProcessMonitor((int)m_device->deviceNum());
+            if (err_run_proc == RGY_ERR_NONE) {
+                // プロセスが起動できたら、その子プロセスのIDを登録する
+                m_deviceUsage->add((int)m_device->deviceNum(), child_pid, devUsageLock.get());
+            }
+        }
+        return RGY_ERR_NONE; // 親の場合は正常終了(並列動作を無効化して継続)を返す
     }
     return RGY_ERR_NONE;
 }
@@ -3825,6 +3910,11 @@ RGY_ERR CQSVPipeline::Init(sInputParams *pParams) {
         }
     }
 
+    m_devNames.clear();
+    for (const auto& dev : deviceList) {
+        m_devNames.push_back(dev->name());
+    }
+
     sts = InitSession(pParams, deviceList);
     RGY_ERR(sts, _T("Failed to initialize encode session."));
     PrintMes(RGY_LOG_DEBUG, _T("InitSession: Success.\n"));
@@ -3837,11 +3927,15 @@ RGY_ERR CQSVPipeline::Init(sInputParams *pParams) {
     if (sts < RGY_ERR_NONE) return sts;
     PrintMes(RGY_LOG_DEBUG, _T("InitInput: Success.\n"));
 
+    // 並列動作の子は読み込みが終了したらすぐに並列動作を呼び出し
+    if (pParams->ctrl.parallelEnc.isChild()) {
+        sts = InitParallelEncode(pParams, (int)m_devNames.size());
+        if (sts < RGY_ERR_NONE) return sts;
+    }
+
     sts = CheckParam(pParams);
     if (sts != RGY_ERR_NONE) return sts;
     PrintMes(RGY_LOG_DEBUG, _T("CheckParam: Success.\n"));
-
-    m_encTimestamp = std::make_unique<RGYTimestamp>(pParams->common.timestampPassThrough);
 
     sts = InitMfxDecParams();
     if (sts < RGY_ERR_NONE) return sts;
@@ -3867,6 +3961,14 @@ RGY_ERR CQSVPipeline::Init(sInputParams *pParams) {
     sts = InitPerfMonitor(pParams);
     if (sts < RGY_ERR_NONE) return sts;
 
+    // 親はエンコード設定が完了してから並列動作を呼び出し
+    if (pParams->ctrl.parallelEnc.isParent()) {
+        sts = InitParallelEncode(pParams, (int)m_devNames.size());
+        if (sts < RGY_ERR_NONE) return sts;
+    }
+
+    m_encTimestamp = std::make_unique<RGYTimestamp>(pParams->common.timestampPassThrough, pParams->ctrl.parallelEnc.isParent() /*durationは子エンコーダで修正済み*/);
+
     sts = InitOutput(pParams);
     if (sts < RGY_ERR_NONE) return sts;
 
@@ -3886,7 +3988,7 @@ RGY_ERR CQSVPipeline::Init(sInputParams *pParams) {
         PrintMes(RGY_LOG_ERROR, _T("None of the pipeline element (DEC,VPP,ENC) are activated!\n"));
         return RGY_ERR_INVALID_VIDEO_PARAM;
     }
-    PrintMes(RGY_LOG_INFO, _T("pipeline element count: %d\n"), nPipelineElements);
+    PrintMes(RGY_LOG_DEBUG, _T("pipeline element count: %d\n"), nPipelineElements);
 
     sts = InitVideoQualityMetric(pParams);
     if (sts < RGY_ERR_NONE) return sts;
@@ -3961,6 +4063,7 @@ void CQSVPipeline::Close() {
     PrintMes(RGY_LOG_DEBUG, _T("Closing device...\n"));
     m_device.reset();
     m_deviceUsage.reset();
+    m_parallelEnc.reset();
 
     m_trimParam.list.clear();
     m_trimParam.offset = 0;
@@ -4186,15 +4289,28 @@ bool CQSVPipeline::VppAfsRffAware() const {
 RGY_ERR CQSVPipeline::CreatePipeline(const sInputParams* prm) {
     m_pipelineTasks.clear();
 
+    if (m_parallelEnc && m_parallelEnc->id() < 0) {
+        // 親プロセスの子プロセスのデータ回収用
+        std::unique_ptr<PipelineTaskAudio> taskAudio;
+        if (m_pFileWriterListAudio.size() > 0) {
+            taskAudio = std::make_unique<PipelineTaskAudio>(m_pFileReader.get(), m_AudioReaders, m_pFileWriterListAudio, m_vpFilters, 0, m_mfxVer, m_pQSVLog);
+        }
+        const auto encOutputTimebase = (ENCODER_QSV) ? to_rgy(HW_NATIVE_TIMEBASE) : m_outputTimebase;
+        m_pipelineTasks.push_back(std::make_unique<PipelineTaskParallelEncBitstream>(m_pFileReader.get(), m_encTimestamp.get(), m_timecode.get(), m_parallelEnc.get(), m_pStatus.get(), m_encFps, encOutputTimebase, taskAudio, 0, m_mfxVer, m_pQSVLog));
+        return RGY_ERR_NONE;
+    }
+
+    // 並列処理時用の終了時刻 (この時刻は含まないようにする) -1の場合は制限なし(最後まで)
+    const auto parallelEncEndPts = (m_parallelEnc) ? m_parallelEnc->getVideoEndKeyPts() : -1ll;
     if (m_pFileReader->getInputCodec() == RGY_CODEC_UNKNOWN) {
-        m_pipelineTasks.push_back(std::make_unique<PipelineTaskInput>(&m_device->mfxSession(), m_device->allocator(), 0, m_pFileReader.get(), m_mfxVer, m_cl, m_pQSVLog));
+        m_pipelineTasks.push_back(std::make_unique<PipelineTaskInput>(&m_device->mfxSession(), m_device->allocator(), parallelEncEndPts, 0, m_pFileReader.get(), m_mfxVer, m_cl, m_pQSVLog));
     } else {
         auto err = err_to_rgy(m_device->mfxSession().JoinSession(m_mfxDEC->GetSession()));
         if (err != RGY_ERR_NONE) {
             PrintMes(RGY_LOG_ERROR, _T("Failed to join mfx vpp session: %s.\n"), get_err_mes(err));
             return err;
         }
-        m_pipelineTasks.push_back(std::make_unique<PipelineTaskMFXDecode>(&m_device->mfxSession(), 1, m_mfxDEC->mfxdec(), m_mfxDEC->mfxparams(), m_mfxDEC->skipAV1C(), m_pFileReader.get(), m_mfxVer, m_pQSVLog));
+        m_pipelineTasks.push_back(std::make_unique<PipelineTaskMFXDecode>(&m_device->mfxSession(), 1, m_mfxDEC->mfxdec(), m_mfxDEC->mfxparams(), m_mfxDEC->skipAV1C(), parallelEncEndPts, m_pFileReader.get(), m_mfxVer, m_pQSVLog));
     }
     if (m_pFileWriterListAudio.size() > 0) {
         m_pipelineTasks.push_back(std::make_unique<PipelineTaskAudio>(m_pFileReader.get(), m_AudioReaders, m_pFileWriterListAudio, m_vpFilters, 0, m_mfxVer, m_pQSVLog));
@@ -4204,8 +4320,8 @@ RGY_ERR CQSVPipeline::CreatePipeline(const sInputParams* prm) {
     const auto inputFrameInfo = m_pFileReader->GetInputFrameInfo();
     const auto inputFpsTimebase = rgy_rational<int>((int)inputFrameInfo.fpsD, (int)inputFrameInfo.fpsN);
     const auto srcTimebase = (m_pFileReader->getInputTimebase().n() > 0 && m_pFileReader->getInputTimebase().is_valid()) ? m_pFileReader->getInputTimebase() : inputFpsTimebase;
-    if (m_trimParam.list.size() > 0 || prm->common.seekToSec > 0.0f) {
-        m_pipelineTasks.push_back(std::make_unique<PipelineTaskTrim>(m_trimParam, m_pFileReader.get(), srcTimebase, 0, m_mfxVer, m_pQSVLog));
+    if (m_trimParam.list.size() > 0 || prm->common.seekToSec > 0.0f || m_parallelEnc) {
+        m_pipelineTasks.push_back(std::make_unique<PipelineTaskTrim>(m_trimParam, m_pFileReader.get(), m_parallelEnc.get(), srcTimebase, 0, m_mfxVer, m_pQSVLog));
     }
     m_pipelineTasks.push_back(std::make_unique<PipelineTaskCheckPTS>(&m_device->mfxSession(), srcTimebase, m_outputTimebase, outFrameDuration, m_nAVSyncMode, m_timestampPassThrough, VppAfsRffAware() && m_pFileReader->rffAware(), m_mfxVer, m_pQSVLog));
 
@@ -4216,7 +4332,7 @@ RGY_ERR CQSVPipeline::CreatePipeline(const sInputParams* prm) {
                 PrintMes(RGY_LOG_ERROR, _T("Failed to join mfx vpp session: %s.\n"), get_err_mes(err));
                 return err;
             }
-            m_pipelineTasks.push_back(std::make_unique<PipelineTaskMFXVpp>(&m_device->mfxSession(), 1, filterBlock.vppmfx.get(), filterBlock.vppmfx->mfxparams(), filterBlock.vppmfx->mfxver(), m_timestampPassThrough, m_pQSVLog));
+            m_pipelineTasks.push_back(std::make_unique<PipelineTaskMFXVpp>(&m_device->mfxSession(), 1, filterBlock.vppmfx.get(), filterBlock.vppmfx->mfxparams(), filterBlock.vppmfx->mfxver(), m_outputTimebase, m_timestampPassThrough, m_pQSVLog));
         } else if (filterBlock.type == VppFilterType::FILTER_OPENCL) {
             if (!m_cl) {
                 PrintMes(RGY_LOG_ERROR, _T("OpenCL not enabled, OpenCL filters cannot be used.\n"), CPU_GEN_STR[m_device->CPUGen()]);
@@ -4329,7 +4445,7 @@ RGY_ERR CQSVPipeline::RunEncode2() {
         if (err == RGY_ERR_NONE || err == RGY_ERR_MORE_DATA || err == RGY_ERR_MORE_SURFACE || err == RGY_ERR_MORE_BITSTREAM) return RGY_LOG_DEBUG;
         if (err > RGY_ERR_NONE) return RGY_LOG_WARN;
         return RGY_LOG_ERROR;
-    };
+        };
     struct PipelineTaskData {
         size_t task;
         std::unique_ptr<PipelineTaskOutput> data;
@@ -4341,7 +4457,7 @@ RGY_ERR CQSVPipeline::RunEncode2() {
         auto checkContinue = [&checkAbort](RGY_ERR& err) {
             if (checkAbort() || stdInAbort()) { err = RGY_ERR_ABORTED; return false; }
             return err >= RGY_ERR_NONE || err == RGY_ERR_MORE_DATA || err == RGY_ERR_MORE_SURFACE;
-        };
+            };
         while (checkContinue(err)) {
             if (dataqueue.empty()) {
                 speedCtrl.wait(m_pipelineTasks.front()->outputFrames());
@@ -4364,7 +4480,7 @@ RGY_ERR CQSVPipeline::RunEncode2() {
                         //出てきたものは先頭に追加していく
                         std::for_each(output.rbegin(), output.rend(), [itask = d.task, &dataqueue](auto&& o) {
                             dataqueue.push_front(PipelineTaskData(itask + 1, o));
-                        });
+                            });
                     }
                 } else { // pipelineの最終的なデータを出力
                     if ((err = d.data->write(m_pFileWriter.get(), m_device->allocator(), (m_cl) ? &m_cl->queue() : nullptr, m_videoQualityMetric.get())) != RGY_ERR_NONE) {
@@ -4399,7 +4515,7 @@ RGY_ERR CQSVPipeline::RunEncode2() {
         auto checkContinue = [&checkAbort](RGY_ERR& err) {
             if (checkAbort()) { err = RGY_ERR_ABORTED; return false; }
             return err >= RGY_ERR_NONE || err == RGY_ERR_MORE_SURFACE;
-        };
+            };
         for (size_t flushedTaskSend = 0, flushedTaskGet = 0; flushedTaskGet < m_pipelineTasks.size(); ) { // taskを前方からひとつづつflushしていく
             err = RGY_ERR_NONE;
             if (flushedTaskSend == flushedTaskGet) {
@@ -4421,7 +4537,7 @@ RGY_ERR CQSVPipeline::RunEncode2() {
                     //出てきたものは先頭に追加していく
                     std::for_each(output.rbegin(), output.rend(), [itask = d.task, &dataqueue](auto&& o) {
                         dataqueue.push_front(PipelineTaskData(itask + 1, o));
-                    });
+                        });
                     RGY_IGNORE_STS(err, RGY_ERR_MORE_DATA); //VPPなどでsendFrameがRGY_ERR_MORE_DATAだったが、フレームが出てくる場合がある
                 } else { // pipelineの最終的なデータを出力
                     if ((err = d.data->write(m_pFileWriter.get(), m_device->allocator(), (m_cl) ? &m_cl->queue() : nullptr, m_videoQualityMetric.get())) != RGY_ERR_NONE) {
@@ -4449,6 +4565,8 @@ RGY_ERR CQSVPipeline::RunEncode2() {
             }
         }
     }
+    // エラー終了の場合も含めキューをすべて開放する (m_pipelineTasksを解放する前に行う)
+    dataqueue.clear();
 
     if (m_videoQualityMetric) {
         PrintMes(RGY_LOG_DEBUG, _T("Flushing video quality metric calc.\n"));
@@ -4494,6 +4612,10 @@ RGY_ERR CQSVPipeline::RunEncode2() {
     }
     //この中でフレームの解放がなされる
     PrintMes(RGY_LOG_DEBUG, _T("Clear pipeline tasks and allocated frames...\n"));
+    // 依存関係があるため、m_pipelineTasksを後ろから解放する
+    for (auto it = m_pipelineTasks.rbegin(); it != m_pipelineTasks.rend(); ++it) {
+        it->reset();
+    }
     m_pipelineTasks.clear();
     PrintMes(RGY_LOG_DEBUG, _T("Waiting for writer to finish...\n"));
     m_pFileWriter->WaitFin();
@@ -4520,7 +4642,11 @@ RGY_ERR CQSVPipeline::RunEncode2() {
         }
     }
     PrintMes(RGY_LOG_DEBUG, _T("RunEncode2: finished.\n"));
-    return (err == RGY_ERR_NONE || err == RGY_ERR_MORE_DATA || err == RGY_ERR_MORE_SURFACE || err == RGY_ERR_MORE_BITSTREAM || err > RGY_ERR_NONE) ? RGY_ERR_NONE : err;
+    err = (err == RGY_ERR_NONE || err == RGY_ERR_MORE_DATA || err == RGY_ERR_MORE_SURFACE || err == RGY_ERR_MORE_BITSTREAM || err > RGY_ERR_NONE) ? RGY_ERR_NONE : err;
+    if (m_parallelEnc) {
+        m_parallelEnc->close(err == RGY_ERR_NONE);
+    }
+    return err;
 }
 
 void CQSVPipeline::PrintMes(RGYLogLevel log_level, const TCHAR *format, ...) {
@@ -4682,20 +4808,28 @@ RGY_ERR CQSVPipeline::CheckCurrentVideoParam(TCHAR *str, mfxU32 bufSize) {
     PRINT_INFO(    _T("CPU Info       %s\n"), cpuInfo);
     if (Check_HWUsed(impl)) {
         PRINT_INFO(_T("GPU Info       %s\n"), gpu_info);
-    }
-    if (Check_HWUsed(impl)) {
-        const TCHAR *adaptorType = _T("");
-        switch (m_device->adapterType()) {
-        case MFX_MEDIA_INTEGRATED: adaptorType = _T("i"); break;
-        case MFX_MEDIA_DISCRETE: adaptorType = _T("d"); break;
+        for (const auto& devName : m_devNames) {
+            if (devName != m_device->name()) {
+                PRINT_INFO(_T("               %s\n"), devName.c_str());
+            }
         }
-        static const TCHAR * const NUM_APPENDIX[] = { _T("st"), _T("nd"), _T("rd"), _T("th")};
-        mfxU32 iGPUID = GetAdapterID(m_device->mfxSession());
-        PRINT_INFO(    _T("Media SDK      QuickSyncVideo (hardware encoder)%s, %d%s GPU(%s), API v%d.%02d\n"),
-            get_low_power_str(outFrameInfo->videoPrm.mfx.LowPower), iGPUID + 1, NUM_APPENDIX[clamp(iGPUID, 0, _countof(NUM_APPENDIX) - 1)],
-            adaptorType, m_mfxVer.Major, m_mfxVer.Minor);
-    } else {
-        PRINT_INFO(    _T("Media SDK      software encoder, API v%d.%02d\n"), m_mfxVer.Major, m_mfxVer.Minor);
+
+        auto gpu_num_str = [](int id, int adaptor_type) {
+            const TCHAR *adaptorTypeStr = nullptr;
+            switch (adaptor_type) {
+            case MFX_MEDIA_INTEGRATED: adaptorTypeStr = _T("i"); break;
+            case MFX_MEDIA_DISCRETE: adaptorTypeStr = _T("d"); break;
+            }
+            static const TCHAR * const NUM_APPENDIX[] = { _T("st"), _T("nd"), _T("rd"), _T("th") };
+            auto str = strsprintf(_T("%d%s"), id, NUM_APPENDIX[clamp(id-1, 0, _countof(NUM_APPENDIX) - 1)]);
+            if (adaptorTypeStr) {
+                str += strsprintf(_T("(%s)"), adaptorTypeStr);
+            }
+            return str;
+        };
+        tstring gpuNumStr = gpu_num_str((int)m_device->deviceNum(), m_device->adapterType());
+        PRINT_INFO(_T("Media SDK      QuickSyncVideo API v%d.%02d,%s, %s GPU\n"), m_mfxVer.Major, m_mfxVer.Minor,
+            get_low_power_str(outFrameInfo->videoPrm.mfx.LowPower), gpuNumStr.c_str());
     }
     PRINT_INFO(    _T("Async Depth    %d frames\n"), m_nAsyncDepth);
     if (check_lib_version(m_mfxVer, MFX_LIB_VERSION_2_5)) {

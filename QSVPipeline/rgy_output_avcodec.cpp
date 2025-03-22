@@ -82,6 +82,9 @@ static bool format_is_latm(const AVFormatContext *formatCtx) {
 static bool format_is_ivf(const AVFormatContext *formatCtx) {
     return _stricmp(formatCtx->oformat->name, "ivf") == 0;
 }
+static bool format_is_mpegts(const AVFormatContext *formatCtx) {
+    return _stricmp(formatCtx->oformat->name, "mpegts") == 0;
+}
 
 #if ENABLE_AVSW_READER
 #if USE_CUSTOM_IO
@@ -118,6 +121,7 @@ AVMuxFormat::AVMuxFormat() :
     headerOptions(nullptr),
     disableMp4Opt(false),
     lowlatency(false),
+    offsetVideoDtsAdvance(false),
     allowOtherNegativePts(false),
     timestampPassThrough(false) {
 }
@@ -135,6 +139,7 @@ AVMuxVideo::AVMuxVideo() :
     fpsBaseNextDts(0),
     fpTsLogFile(),
     hdrBitstream(),
+    hdr10plus(nullptr),
     hdr10plusMetadataCopy(false),
     doviProfileSrc(RGY_DOVI_PROFILE_UNSET),
     doviProfileDst(RGY_DOVI_PROFILE_UNSET),
@@ -413,6 +418,7 @@ void RGYOutputAvcodec::CloseVideo(AVMuxVideo *muxVideo) {
         av_packet_unref(m_Mux.video.pktParse);
         av_packet_free(&m_Mux.video.pktParse);
     }
+    m_Mux.video.hdr10plus = nullptr;
     m_Mux.video.doviRpu = nullptr;
     m_Mux.video.timestamp = nullptr;
 
@@ -832,7 +838,10 @@ RGY_ERR RGYOutputAvcodec::InitVideo(const VideoInfo *videoOutputInfo, const Avco
         AddMessage(RGY_LOG_DEBUG, _T("Set Video Codec Tag: %s\n"), char_to_tstring(tagToStr(m_Mux.video.codecCtx->codec_tag)).c_str());
     } else if (videoOutputInfo->codec == RGY_CODEC_HEVC) {
         // 特に指定の場合、HEVCでは再生互換性改善のため、 "hvc1"をデフォルトとする (libavformatのデフォルトは"hev1")
-        m_Mux.video.codecCtx->codec_tag = tagFromStr("hvc1");
+        // ただし、parallelEncodeが有効な場合は、"hve1"を使用する
+        m_Mux.video.codecCtx->codec_tag = (prm->parallelEncode) ? tagFromStr("hev1") : tagFromStr("hvc1");
+    } else if (videoOutputInfo->codec == RGY_CODEC_H264) {
+        m_Mux.video.codecCtx->codec_tag = (prm->parallelEncode) ? tagFromStr("avc3") : tagFromStr("avc1");
     }
     if (videoOutputInfo->vui.descriptpresent
         //atcSeiを設定する場合は、コンテナ側にはVUI情報をもたせないようにする
@@ -888,8 +897,9 @@ RGY_ERR RGYOutputAvcodec::InitVideo(const VideoInfo *videoOutputInfo, const Avco
     m_Mux.video.pktParse          = av_packet_alloc();
     m_Mux.video.afs               = prm->afs;
     m_Mux.video.debugDirectAV1Out = prm->debugDirectAV1Out;
-    m_Mux.video.doviRpu           = prm->doviRpu;
+    m_Mux.video.hdr10plus         = prm->hdr10plus;
     m_Mux.video.hdr10plusMetadataCopy = prm->hdr10plusMetadataCopy;
+    m_Mux.video.doviRpu           = prm->doviRpu;
     m_Mux.video.doviRpuMetadataCopy = prm->doviRpuMetadataCopy;
     m_Mux.video.doviRpuConvertParam = prm->doviRpuConvertParam;
 
@@ -954,6 +964,7 @@ RGY_ERR RGYOutputAvcodec::InitVideo(const VideoInfo *videoOutputInfo, const Avco
 #if LIBAVUTIL_DOVI_META_AVAIL
         std::unique_ptr<AVDOVIDecoderConfigurationRecord, RGYAVDeleter<AVDOVIDecoderConfigurationRecord>> doviconf;
         if (prm->videoInputStream) {
+            // まず入力ファイルのdovi profileを読み取る
             size_t side_data_size = 0;
             doviconf = AVStreamGetSideData<AVDOVIDecoderConfigurationRecord>(prm->videoInputStream, AV_PKT_DATA_DOVI_CONF, side_data_size);
             if (doviconf) {
@@ -1005,6 +1016,7 @@ RGY_ERR RGYOutputAvcodec::InitVideo(const VideoInfo *videoOutputInfo, const Avco
             }
         }
         if (prm->doviProfile != RGY_DOVI_PROFILE_COPY) {
+            // コピーでない場合はコンテナに設定するdovi profileを新規作成あるいは上書きする
             size_t conf_size = 0;
             doviconf = std::unique_ptr<AVDOVIDecoderConfigurationRecord, RGYAVDeleter<AVDOVIDecoderConfigurationRecord>>(av_dovi_alloc(&conf_size), RGYAVDeleter<AVDOVIDecoderConfigurationRecord>(av_freep));
             doviconf->dv_version_major = 1;
@@ -1045,7 +1057,15 @@ RGY_ERR RGYOutputAvcodec::InitVideo(const VideoInfo *videoOutputInfo, const Avco
             AddMessage(RGY_LOG_DEBUG, _T("copied AV_PKT_DATA_DOVI_CONF from input\n"));
             doviconf.reset();
         }
-        if (m_Mux.video.doviProfileSrc == m_Mux.video.doviProfileDst) {
+        if (   m_Mux.video.doviProfileSrc == m_Mux.video.doviProfileDst // 入出力が同じなら変換しない
+            || (    m_Mux.video.doviProfileSrc == RGY_DOVI_PROFILE_UNSET // 入力ファイルから情報が取得できなかった場合
+                 || m_Mux.video.doviProfileSrc == RGY_DOVI_PROFILE_81 //profile 8.x(HEVC) や 10.x(AV1) は変換しない
+                 || m_Mux.video.doviProfileSrc == RGY_DOVI_PROFILE_82
+                 || m_Mux.video.doviProfileSrc == RGY_DOVI_PROFILE_84
+                 || m_Mux.video.doviProfileSrc == RGY_DOVI_PROFILE_100
+                 || m_Mux.video.doviProfileSrc == RGY_DOVI_PROFILE_101
+                 || m_Mux.video.doviProfileSrc == RGY_DOVI_PROFILE_102
+                 || m_Mux.video.doviProfileSrc == RGY_DOVI_PROFILE_104)) {
             m_Mux.video.doviRpuConvertParam.convertProfile = false;
         }
 #else
@@ -2110,6 +2130,7 @@ RGY_ERR RGYOutputAvcodec::Init(const TCHAR *strFileName, const VideoInfo *videoO
     m_Mux.format.isMatroska = format_is_mkv(m_Mux.format.formatCtx);
     m_Mux.format.disableMp4Opt = prm->disableMp4Opt;
     m_Mux.format.lowlatency = prm->lowlatency;
+    m_Mux.format.offsetVideoDtsAdvance = prm->offsetVideoDtsAdvance;
     m_Mux.format.allowOtherNegativePts = prm->allowOtherNegativePts;
     m_Mux.format.timestampPassThrough = prm->timestampPassThrough;
 
@@ -2527,6 +2548,20 @@ RGY_ERR RGYOutputAvcodec::WriteFileHeader(const RGYBitstream *bitstream) {
         }
     }
     av_dict_set(&m_Mux.format.headerOptions, "strict", "experimental", 0);
+    if (m_Mux.format.offsetVideoDtsAdvance && m_VideoOutputInfo.videoDelay > 0) {
+        // output_ts_offset で補正する
+        // まず、output_ts_offsetの指定があるかを検索
+        double orig_offset = 0.0;
+        auto entry = av_dict_get(m_Mux.format.headerOptions, "output_ts_offset", nullptr, AV_DICT_MATCH_CASE | AV_DICT_IGNORE_SUFFIX);
+        if (!entry || sscanf_s(entry->value, "%lf", &orig_offset) != 1) {
+            orig_offset = 0.0;
+        }
+        const AVRational fpsTimebase = (m_Mux.video.afs) ? av_inv_q(av_mul_q(m_Mux.video.outputFps, av_make_q(4, 5))) : av_inv_q(m_Mux.video.outputFps);
+        const auto new_offset = orig_offset + m_VideoOutputInfo.videoDelay * av_q2d(fpsTimebase);
+        const auto new_offset_str = strsprintf("%.17lf", new_offset);
+        AddMessage(RGY_LOG_DEBUG, _T("Change output_ts_offset for %lf to avoid negative dts: %.17lf -> %.17lf.\n"), -1.0 * bitstream->dts() * av_q2d(m_Mux.video.streamOut->time_base), orig_offset, new_offset);
+        av_dict_set(&m_Mux.format.headerOptions, "output_ts_offset", new_offset_str.c_str(), AV_DICT_MATCH_CASE);
+    }
 
     //なんらかの問題があると、ここでよく死ぬ
     int ret = 0;
@@ -2831,15 +2866,19 @@ RGY_ERR RGYOutputAvcodec::WriteNextFrameInternalOneFrame(RGYBitstream *bitstream
     std::vector<std::unique_ptr<RGYOutputInsertMetadata>> metadataList;
     if (m_Mux.video.hdrBitstream.size() > 0) {
         std::vector<uint8_t> data(m_Mux.video.hdrBitstream.data(), m_Mux.video.hdrBitstream.data() + m_Mux.video.hdrBitstream.size());
-        metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(data, (m_VideoOutputInfo.codec == RGY_CODEC_AV1) ? false : true, false));
+        metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(data, true, RGYOutputInsertMetadataPosition::Prefix));
     }
-    if (m_Mux.video.hdr10plusMetadataCopy) {
+    if (m_Mux.video.hdr10plus) {
+        if (auto data = m_Mux.video.hdr10plus->getData(bs_framedata.inputFrameId, m_VideoOutputInfo.codec); data.size() > 0) {
+            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(data, false, RGYOutputInsertMetadata::dhdr10plus_pos(m_VideoOutputInfo.codec)));
+        }
+    } else if (m_Mux.video.hdr10plusMetadataCopy) {
         auto [err_hdr10plus, metadata_hdr10plus] = getMetadata<RGYFrameDataHDR10plus>(RGY_FRAME_DATA_HDR10PLUS, bs_framedata, nullptr);
         if (err_hdr10plus != RGY_ERR_NONE) {
             return err_hdr10plus;
         }
         if (metadata_hdr10plus.size() > 0) {
-            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(metadata_hdr10plus, false, false));
+            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(metadata_hdr10plus, false, RGYOutputInsertMetadata::dhdr10plus_pos(m_VideoOutputInfo.codec)));
         }
     }
     if (m_Mux.video.doviRpu) {
@@ -2848,7 +2887,7 @@ RGY_ERR RGYOutputAvcodec::WriteNextFrameInternalOneFrame(RGYBitstream *bitstream
             AddMessage(RGY_LOG_ERROR, _T("Failed to get dovi rpu for %lld.\n"), bs_framedata.inputFrameId);
         }
         if (dovi_nal.size() > 0) {
-            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(dovi_nal, false, m_VideoOutputInfo.codec == RGY_CODEC_HEVC ? true : false));
+            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(dovi_nal, false, RGYOutputInsertMetadata::dovirpu_pos(m_VideoOutputInfo.codec)));
         }
     } else if (m_Mux.video.doviRpuMetadataCopy) {
         auto doviRpuConvPrm = std::make_unique<RGYFrameDataDOVIRpuConvertParam>(m_Mux.video.doviProfileDst, m_Mux.video.doviRpuConvertParam);
@@ -2857,7 +2896,7 @@ RGY_ERR RGYOutputAvcodec::WriteNextFrameInternalOneFrame(RGYBitstream *bitstream
             return err_dovirpu;
         }
         if (metadata_dovi_rpu.size() > 0) {
-            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(metadata_dovi_rpu, false, m_VideoOutputInfo.codec == RGY_CODEC_HEVC ? true : false));
+            metadataList.push_back(std::make_unique<RGYOutputInsertMetadata>(metadata_dovi_rpu, false, RGYOutputInsertMetadata::dovirpu_pos(m_VideoOutputInfo.codec)));
         }
     }
 
@@ -2897,9 +2936,9 @@ RGY_ERR RGYOutputAvcodec::WriteNextFrameInternalOneFrame(RGYBitstream *bitstream
         pkt->dts = m_Mux.video.timestampList.get_min_pts();
     }
     if (WRITE_PTS_DEBUG) {
-        AddMessage(RGY_LOG_WARN, _T("video pts %3d, %12s, pts, %lld (%d/%d) [%s]\n"),
+        AddMessage(RGY_LOG_WARN, _T("video pts %3d, %12s, dts %lld, pts, %lld (%d/%d) [%s]\n"),
             pkt->stream_index, char_to_tstring(avcodec_get_name(m_Mux.format.formatCtx->streams[pkt->stream_index]->codecpar->codec_id)).c_str(),
-            pkt->pts, streamTimebase.num, streamTimebase.den, getTimestampString(pkt->pts, streamTimebase).c_str());
+            pkt->dts, pkt->pts, streamTimebase.num, streamTimebase.den, getTimestampString(pkt->pts, streamTimebase).c_str());
     }
     const auto pts = pkt->pts, dts = pkt->dts, duration = pkt->duration;
     *writtenDts = av_rescale_q(pkt->dts, streamTimebase, QUEUE_DTS_TIMEBASE);
@@ -2930,10 +2969,6 @@ RGY_ERR RGYOutputAvcodec::WriteNextFrameInternal(RGYBitstream *bitstream, int64_
 #else
         m_Mux.video.dtsUnavailable = true;
 #endif
-        RGY_ERR sts = WriteFileHeader(bitstream);
-        if (sts != RGY_ERR_NONE) {
-            return sts;
-        }
 
         //dts生成を初期化
         //何フレーム前からにすればよいかは、b-pyramid次第で異なるので、可能な限りエンコーダの情報を使用する
@@ -2943,12 +2978,19 @@ RGY_ERR RGYOutputAvcodec::WriteNextFrameInternal(RGYBitstream *bitstream, int64_
             m_VideoOutputInfo.videoDelay = (m_VideoOutputInfo.codec == RGY_CODEC_AV1 && AV1_TIMESTAMP_OVERRIDE) ? 0 : -1 * (int)av_rescale_q(bitstream->dts() - bitstream->pts(), srcTimebase, av_inv_q(m_Mux.video.outputFps));
         }
 #endif
+        RGY_ERR sts = WriteFileHeader(bitstream);
+        if (sts != RGY_ERR_NONE) {
+            return sts;
+        }
+
+        // WriteFileHeaderでstreamOut->time_baseが変わることがあるので、まずWriteFileHeaderを先に行ってから、この処理を行う
         m_Mux.video.fpsBaseNextDts = 0 - m_VideoOutputInfo.videoDelay;
         AddMessage(RGY_LOG_DEBUG, _T("calc dts, first dts %d x (timebase).\n"), m_Mux.video.fpsBaseNextDts);
 
         const AVRational fpsTimebase = (m_Mux.video.afs) ? av_inv_q(av_mul_q(m_Mux.video.outputFps, av_make_q(4, 5))) : av_inv_q(m_Mux.video.outputFps);
         const AVRational streamTimebase = m_Mux.video.streamOut->time_base;
         const auto firstPacketPts = av_rescale_q(bitstream->pts(), srcTimebase, streamTimebase);
+        bitstream->setDts(firstPacketPts + av_rescale_q(m_Mux.video.fpsBaseNextDts, fpsTimebase, streamTimebase));
         for (int i = m_Mux.video.fpsBaseNextDts; i < 0; i++) {
             m_Mux.video.timestampList.add(firstPacketPts + av_rescale_q(i, fpsTimebase, streamTimebase));
         }

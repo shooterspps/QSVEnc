@@ -61,7 +61,7 @@
 
 static bool RGYThreadStillActive(HANDLE handle) {
     DWORD exitCode = 0;
-    return GetExitCodeThread(handle, &exitCode) == STILL_ACTIVE;
+    return GetExitCodeThread(handle, &exitCode) != 0 && exitCode == STILL_ACTIVE;
 }
 
 static bool RGYProcessExists(DWORD pid) {
@@ -239,6 +239,10 @@ static inline int fopen_s(FILE **pfp, const char *filename, const char *mode) {
 static uint32_t GetCurrentProcessId() {
     pid_t pid = getpid();
     return (uint32_t)pid;
+}
+
+static uint32_t GetCurrentThreadId() {
+    return (uint32_t)pthread_self();
 }
 
 static pid_t GetCurrentProcess() {

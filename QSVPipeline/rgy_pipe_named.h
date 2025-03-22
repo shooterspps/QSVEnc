@@ -23,49 +23,40 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 //
-// ------------------------------------------------------------------------------------------
+// --------------------------------------------------------------------------------------------
 
 #pragma once
-#ifndef __RGY_INPUT_RAW_H__
-#define __RGY_INPUT_RAW_H__
+#ifndef __RGY_PIPE_NAMED_H__
+#define __RGY_PIPE_NAMED_H__
 
-#include "rgy_input.h"
+#include <cstdint>
+#include <cstdio>
+#include <vector>
+#include "rgy_osdep.h"
+#include "rgy_event.h"
+#include "rgy_util.h"
 
-#if ENABLE_RAW_READER
-
-
-
-class RGYInputPrmRaw : public RGYInputPrm {
+class RGYNamedPipe {
 public:
-    RGY_CSP inputCsp;
-
-    RGYInputPrmRaw(RGYInputPrm base) : RGYInputPrm(base), inputCsp(RGY_CSP_YV12) {};
-    virtual ~RGYInputPrmRaw() {};
-};
-
-class RGYInputRaw : public RGYInput {
-public:
-    RGYInputRaw();
-    virtual ~RGYInputRaw();
-
-    virtual void Close() override;
-
-    virtual bool isPipe() const override {
-        return m_isPipe;
-    }
-
+    RGYNamedPipe();
+    virtual ~RGYNamedPipe();
+    int init(const tstring& pipeName, const bool overlapped);
+    int connect(DWORD timeout);
+    int write(const void *data, const size_t size, size_t *writeSize);
+    int read(void *data, const size_t size, size_t *readSize);
+    int disconnect();
+    int close();
+    HANDLE handle() const { return m_handle; }
+    bool connected() const { return m_connected; }
+    const tstring& name() const { return m_name; }
+    FILE *fp(const char *mode);
 protected:
-    virtual RGY_ERR Init(const TCHAR *strFileName, VideoInfo *pInputInfo, const RGYInputPrm *prm) override;
-    virtual RGY_ERR LoadNextFrameInternal(RGYFrame *pSurface) override;
-    RGY_ERR ParseY4MHeader(char *buf, VideoInfo *pInfo);
-
-    FILE *m_fSource;
-
-    uint32_t m_nBufSize;
-    shared_ptr<uint8_t> m_pBuffer;
-    bool m_isPipe;
+    HANDLE m_handle;
+    FILE *m_fp;
+    unique_event m_event;
+    tstring m_name;
+    bool m_connected;
+    bool m_overlapped;
 };
 
-#endif //ENABLE_RAW_READER
-
-#endif //__RGY_INPUT_RAW_H__
+#endif //__RGY_PIPE_NAMED_H__
