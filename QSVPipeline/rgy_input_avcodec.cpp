@@ -73,7 +73,8 @@ AVDemuxFormat::AVDemuxFormat() :
     inputBuffer(nullptr),
     inputBufferSize(0),
     inputFilesize(0),
-    subPacketTemporalBufferIntervalCount(-1) {
+    subPacketTemporalBufferIntervalCount(-1),
+    inputError(RGY_ERR_NONE) {
 }
 
 void AVDemuxFormat::close(RGYLog *log) {
@@ -232,6 +233,7 @@ RGYInputAvcodecPrm::RGYInputAvcodecPrm(RGYInputPrm base) :
     probesize(-1),
     nTrimCount(0),
     pTrimList(nullptr),
+    pixFmtStr(),
     fileIndex(0),
     trackStartAudio(0),
     trackStartSubtitle(0),
@@ -1504,6 +1506,19 @@ RGY_ERR RGYInputAvcodec::initFormatCtx(const TCHAR *strFileName, const RGYInputA
             AddMessage(RGY_LOG_DEBUG, _T("set analyzeduration: %.2f sec\n"), value / (double)AV_TIME_BASE);
         }
     }
+    if (input_prm->pixFmtStr.length() > 0) {
+        const auto pixFmt = av_get_pix_fmt(tchar_to_string(input_prm->pixFmtStr.c_str(), CP_UTF8).c_str());
+        if (pixFmt == AV_PIX_FMT_NONE) {
+            AddMessage(RGY_LOG_ERROR, _T("Unknown input pixel format: %s.\n"), input_prm->pixFmtStr.c_str());
+            return RGY_ERR_INVALID_PARAM;
+        }
+        if (0 != (ret = av_dict_set_int(&m_Demux.format.formatOptions, "pixel_format", pixFmt, 0))) {
+            AddMessage(RGY_LOG_ERROR, _T("failed to set pixel_format to %s, error %s\n"), input_prm->pixFmtStr.c_str(), qsv_av_err2str(ret).c_str());
+        } else {
+            AddMessage(RGY_LOG_DEBUG, _T("set pixel_format: %s\n"), input_prm->pixFmtStr.c_str());
+        }
+    }
+
     if (0 == strcmp(filename_char.c_str(), "-")) {
 #if defined(_WIN32) || defined(_WIN64)
         if (_setmode(_fileno(stdin), _O_BINARY) < 0) {
@@ -2173,7 +2188,7 @@ RGY_ERR RGYInputAvcodec::Init(const TCHAR *strFileName, VideoInfo *inputInfo, co
             { AV_PIX_FMT_NV21,         8, RGY_CHROMAFMT_YUV420, RGY_CSP_NV12 },
             { AV_PIX_FMT_YUVJ422P,     8, RGY_CHROMAFMT_YUV422, RGY_CSP_NA },
             { AV_PIX_FMT_YUYV422,      8, RGY_CHROMAFMT_YUV422, RGY_CSP_YUY2 },
-            { AV_PIX_FMT_UYVY422,      8, RGY_CHROMAFMT_YUV422, RGY_CSP_NA },
+            { AV_PIX_FMT_UYVY422,      8, RGY_CHROMAFMT_YUV422, RGY_CSP_UYVY },
 #if ENCODER_QSV || ENCODER_VCEENC
             { AV_PIX_FMT_YUV422P,      8, RGY_CHROMAFMT_YUV422, RGY_CSP_NV12 },
             { AV_PIX_FMT_NV16,         8, RGY_CHROMAFMT_YUV422, RGY_CSP_NV12 },
@@ -2785,15 +2800,20 @@ std::tuple<int, std::unique_ptr<AVPacket, RGYAVDeleter<AVPacket>>> RGYInputAvcod
                 if (ret < 0) {
                     pkt.reset();
                     AddMessage(RGY_LOG_ERROR, _T("failed to send packet to %s bitstream filter: %s.\n"), char_to_tstring(m_Demux.video.bsfcCtx->filter->name).c_str(), qsv_av_err2str(ret).c_str());
-                    return { 1, nullptr };
+                    ret_read_frame = ret;
+                    break;
                 }
                 ret = av_bsf_receive_packet(m_Demux.video.bsfcCtx, pkt.get());
                 if (ret == AVERROR(EAGAIN)) {
                     continue; //もっとpacketを送らないとダメ
                 } else if (ret < 0 && ret != AVERROR_EOF) {
                     AddMessage(RGY_LOG_ERROR, _T("failed to run %s bitstream filter: %s.\n"), char_to_tstring(m_Demux.video.bsfcCtx->filter->name).c_str(), qsv_av_err2str(ret).c_str());
+                    if (ret == AVERROR_INVALIDDATA) {
+                        AddMessage(RGY_LOG_ERROR, _T("Invalid data found from input file!\n"));
+                    }
                     pkt.reset();
-                    return { 1, nullptr };
+                    ret_read_frame = ret;
+                    break;
                 }
             }
             if (m_Demux.video.stream->codecpar->codec_id == AV_CODEC_ID_VC1) {
@@ -2905,7 +2925,7 @@ std::tuple<int, std::unique_ptr<AVPacket, RGYAVDeleter<AVPacket>>> RGYInputAvcod
     //ファイルの終わりに到達
     if (ret_read_frame != AVERROR_EOF && ret_read_frame < 0) {
         AddMessage(RGY_LOG_ERROR, _T("error while reading file: %d frames, %s\n"), m_Demux.frames.frameNum(), qsv_av_err2str(ret_read_frame).c_str());
-        return { 1, nullptr };
+        m_Demux.format.inputError = RGY_ERR_INVALID_DATA_TYPE;
     }
     AddMessage(RGY_LOG_DEBUG, _T("%d frames, %s\n"), m_Demux.frames.frameNum(), qsv_av_err2str(ret_read_frame).c_str());
     //たまっている字幕があれば送出する
@@ -2986,7 +3006,7 @@ RGY_ERR RGYInputAvcodec::GetNextBitstream(RGYBitstream *pBitstream) {
         m_Demux.video.nSampleGetCount++;
         m_encSatusInfo->m_sData.frameIn++;
     }
-    return sts;
+    return (m_Demux.format.inputError != RGY_ERR_NONE) ? m_Demux.format.inputError : sts;
 }
 
 //動画ストリームの1フレーム分のデータをbitstreamに追加する (リーダー側のデータは残す)
@@ -3014,7 +3034,7 @@ RGY_ERR RGYInputAvcodec::GetNextBitstreamNoDelete(RGYBitstream *pBitstream) {
         }
         m_poolPkt->returnFree(&pkt);
     }
-    return sts;
+    return (m_Demux.format.inputError != RGY_ERR_NONE) ? m_Demux.format.inputError : sts;
 }
 
 void RGYInputAvcodec::GetAudioDataPacketsWhenNoVideoRead(int inputFrame) {
@@ -3455,6 +3475,9 @@ RGY_ERR RGYInputAvcodec::LoadNextFrameInternal(RGYFrame *pSurface) {
     double progressPercent = 0.0;
     if (m_Demux.format.formatCtx->duration) {
         progressPercent = m_Demux.frames.duration() * (m_Demux.video.stream->time_base.num / (double)m_Demux.video.stream->time_base.den);
+    }
+    if (m_Demux.format.inputError != RGY_ERR_NONE) {
+        return m_Demux.format.inputError;
     }
     return m_encSatusInfo->UpdateDisplayByCurrentDuration(progressPercent);
 }

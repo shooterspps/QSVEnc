@@ -866,7 +866,7 @@ static const auto CSP_PIXFMT_RGY = make_array<std::pair<AVPixelFormat, RGY_CSP>>
     std::make_pair(AV_PIX_FMT_YUV422P,     RGY_CSP_YUV422),
     std::make_pair(AV_PIX_FMT_YUVJ422P,    RGY_CSP_YUV422),
     std::make_pair(AV_PIX_FMT_YUYV422,     RGY_CSP_YUY2),
-    std::make_pair(AV_PIX_FMT_UYVY422,     RGY_CSP_NA),
+    std::make_pair(AV_PIX_FMT_UYVY422,     RGY_CSP_UYVY),
     std::make_pair(AV_PIX_FMT_NV16,        RGY_CSP_NV16),
     std::make_pair(AV_PIX_FMT_NV24,        RGY_CSP_NV24),
     std::make_pair(AV_PIX_FMT_YUV444P,     RGY_CSP_YUV444),
@@ -908,6 +908,14 @@ static const auto CSP_PIXFMT_RGY = make_array<std::pair<AVPixelFormat, RGY_CSP>>
 );
 
 MAP_PAIR_0_1(csp, avpixfmt, AVPixelFormat, rgy, RGY_CSP, CSP_PIXFMT_RGY, AV_PIX_FMT_NONE, RGY_CSP_NA);
+
+tstring getAVPixFmtIndex() {
+    tstring mes;
+    for (size_t i = 0; i < CSP_PIXFMT_RGY.size(); i++) {
+        mes += strsprintf(_T("%03d: %s\n"), (int)CSP_PIXFMT_RGY[i].first, av_get_pix_fmt_name(CSP_PIXFMT_RGY[i].first));
+    }
+    return mes;
+}
 
 static const auto RGY_DISPOSITION_TO_AV = make_array<std::pair<tstring, uint32_t>>(
     std::make_pair(_T("default"),          AV_DISPOSITION_DEFAULT),

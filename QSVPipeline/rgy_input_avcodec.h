@@ -722,6 +722,7 @@ struct AVDemuxFormat {
     uint64_t                  inputFilesize;         //入力ファイルサイズ
 
     int64_t                   subPacketTemporalBufferIntervalCount; //字幕のタイムスタンプが入れ違いになっているのを解決する一時的なキューに登録を行ってから他のパケットを取得した数
+    RGY_ERR                   inputError;
 
     AVDemuxFormat();
     ~AVDemuxFormat() { close(); }
@@ -821,6 +822,7 @@ public:
     int64_t        probesize;               //probeするデータサイズ
     int            nTrimCount;              //Trimする動画フレームの領域の数
     sTrim         *pTrimList;               //Trimする動画フレームの領域のリスト
+    tstring        pixFmtStr;               //入力ファイルのピクセルフォーマット
     int            fileIndex;               //audio-source, sub-source等のファイルインデックス、動画と同じファイルなら-1
     int            trackStartAudio;         //音声のトラック番号の開始点
     int            trackStartSubtitle;      //字幕のトラック番号の開始点

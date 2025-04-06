@@ -201,6 +201,8 @@
   - [--tcfile-in \<string\>](#--tcfile-in-string)
   - [--timebase \<int\>/\<int\>](#--timebase-intint)
   - [--input-hevc-bsf \<string\>](#--input-hevc-bsf-string)
+  - [--input-pixel-format \<string\>](#--input-pixel-format-string)
+  - [--offset-video-dts-advance](#--offset-video-dts-advance)
   - [--allow-other-negative-pts](#--allow-other-negative-pts)
 - [vppオプション](#vppオプション)
   - [vppフィルタの適用順](#vppフィルタの適用順)
@@ -1680,6 +1682,12 @@ switch hevc bitstream filter used for hw decoder input. (for debug purpose)
   - libavcodec  
     libavcodec の hevc_mp4toannexb bitstream filter を使用する。
 
+### --input-pixel-format &lt;string&gt;
+avdeviceで使用する "pixel_format" の設定。(それ以外での用途での使用は想定していません)
+
+### --offset-video-dts-advance  
+先頭のdtsが0になるよう、Bフレームによる遅延の分だけtimestampを補正します。
+
 ### --allow-other-negative-pts  
 音声・字幕において負のtimestampを許容する。原則デバッグ用。
 
@@ -3086,14 +3094,6 @@ perceptual pre encode filterを有効にする。
 
 ### --parallel [&lt;int&gt;] or [&lt;string&gt;]
 ファイル分割による並列エンコードを行う。入力ファイルを複数のチャンクに分割し、それぞれを別スレッドで並列にエンコードすることで、処理を高速化する。
-
-- **パラメータ**
-  
-  - mp=&lt;int&gt;
-    並列実行するスレッド数。
-  
-  - chunks=&lt;int&gt;
-    入力ファイルの分割数。
 
 - **制約事項**
   以下の場合、並列エンコードは利用できず、自動的に無効化されます。

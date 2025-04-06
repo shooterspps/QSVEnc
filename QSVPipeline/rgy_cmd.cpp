@@ -4893,6 +4893,11 @@ int parse_one_common_option(const TCHAR *option_name, const TCHAR *strInput[], i
         }
         return 0;
     }
+    if (IS_OPTION("input-pixel-format")) {
+        i++;
+        common->inputPixFmtStr = strInput[i];
+        return 0;
+    }
     if (IS_OPTION("input-retry")) {
         i++;
         int v = 0;
@@ -7058,11 +7063,15 @@ int parse_one_ctrl_option(const TCHAR *option_name, const TCHAR *strInput[], int
     }
 #endif
     if (IS_OPTION("disable-vulkan")) {
-        ctrl->enableVulkan = false;
+        ctrl->enableVulkan = RGYParamInitVulkan::Disable;
         return 0;
     }
     if (IS_OPTION("enable-vulkan")) {
-        ctrl->enableVulkan = true;
+        ctrl->enableVulkan = RGYParamInitVulkan::TargetVendor;
+        return 0;
+    }
+    if (IS_OPTION("enable-vulkan-all")) {
+        ctrl->enableVulkan = RGYParamInitVulkan::All;
         return 0;
     }
     if (IS_OPTION("parallel") && ENABLE_PARALLEL_ENC) {
@@ -8017,6 +8026,7 @@ tstring gen_cmd(const RGYParamCommon *param, const RGYParamCommon *defaultPrm, b
 
     OPT_FLOAT(_T("--input-analyze"), demuxAnalyzeSec, 6);
     OPT_NUM(_T("--input-probesize"), demuxProbesize);
+    OPT_TSTR(_T("--input-pixel-format"), inputPixFmtStr);
     OPT_NUM(_T("--input-retry"), inputRetry);
     if (param->nTrimCount > 0) {
         cmd << _T(" --trim ");
@@ -8531,7 +8541,15 @@ tstring gen_cmd(const RGYParamControl *param, const RGYParamControl *defaultPrm,
 #if ENCODER_QSV || ENCODER_VCEENC || ENCODER_MPP
     OPT_BOOL(_T("--enable-opencl"), _T("--disable-opencl"), enableOpenCL);
 #endif
-    OPT_BOOL(_T("--enable-vulkan"), _T("--disable-vulkan"), enableVulkan);
+    if (param->enableVulkan != defaultPrm->enableVulkan) {
+        if (param->enableVulkan == RGYParamInitVulkan::Disable) {
+            cmd << _T(" --disable-vulkan");
+        } else if (param->enableVulkan == RGYParamInitVulkan::TargetVendor) {
+            cmd << _T(" --enable-vulkan");
+        } else if (param->enableVulkan == RGYParamInitVulkan::All) {
+            cmd << _T(" --enable-vulkan-all");
+        }
+    }
     OPT_BOOL(_T("--process-monitor-dev-usage"), _T(""), processMonitorDevUsage);
     OPT_BOOL(_T("--process-monitor-dev-usage-reset"), _T(""), processMonitorDevUsageReset);
 
@@ -8840,6 +8858,8 @@ tstring gen_cmd_help_common() {
         _T("                                 - libavcodec ... use hevc_mp4toannexb bsf\n"),
         DEFAULT_IGNORE_DECODE_ERROR);
     str += _T("\n")
+        _T("   --input-pixel-format <string>  set input pixel format for avdevice\n")
+        _T("   --offset-video-dts-advance  offset timestamp to cancel bframe delay\n")
         _T("   --allow-other-negative-pts  for debug\n")
         _T("\n");
 #endif
