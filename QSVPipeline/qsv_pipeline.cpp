@@ -205,6 +205,7 @@ bool CQSVPipeline::CompareParam(const QSVVideoParam& prmIn, const QSVVideoParam&
         COMPARE_INT(videoPrm.mfx.ICQQuality, -1);
     } else {
         COMPARE_INT(videoPrm.mfx.TargetKbps, 0);
+        //COMPARE_INT(videoPrm.mfx.BufferSizeInKB, 0);
         if (m_encParams.videoPrm.mfx.RateControlMethod == MFX_RATECONTROL_AVBR) {
             COMPARE_INT(videoPrm.mfx.TargetKbps, 0);
         } else {
@@ -1440,7 +1441,7 @@ bool CQSVPipeline::CPUGenOpenCLSupported(const QSV_CPU_GEN cpu_gen) {
     return cpu_gen != CPU_GEN_SANDYBRIDGE;
 }
 
-RGY_ERR CQSVPipeline::InitOpenCL(const bool enableOpenCL, const bool checkVppPerformance) {
+RGY_ERR CQSVPipeline::InitOpenCL(const bool enableOpenCL, const int openCLBuildThreads, const bool checkVppPerformance) {
     if (!enableOpenCL) {
         PrintMes(RGY_LOG_DEBUG, _T("OpenCL disabled.\n"));
         return RGY_ERR_NONE;
@@ -1515,7 +1516,7 @@ RGY_ERR CQSVPipeline::InitOpenCL(const bool enableOpenCL, const bool checkVppPer
     }
     selectedPlatform->setDev(devices[0]);
 
-    m_cl = std::make_shared<RGYOpenCLContext>(selectedPlatform, m_pQSVLog);
+    m_cl = std::make_shared<RGYOpenCLContext>(selectedPlatform, openCLBuildThreads, m_pQSVLog);
     if (m_cl->createContext((checkVppPerformance) ? CL_QUEUE_PROFILING_ENABLE : 0) != CL_SUCCESS) {
         PrintMes(RGY_LOG_WARN, _T("Failed to create OpenCL context.\n"));
         m_cl.reset();
@@ -3410,6 +3411,7 @@ RGY_ERR CQSVPipeline::deviceAutoSelect(const sInputParams *prm, std::vector<std:
             }
         }
     }
+    const tstring PEPrefix = (prm->ctrl.parallelEnc.isChild()) ? strsprintf(_T("Parallel Enc %d: "), prm->ctrl.parallelEnc.parallelId) : _T("");
 #if ENABLE_PERF_COUNTER
     PrintMes(RGY_LOG_DEBUG, _T("Auto select device from %d devices.\n"), (int)gpuList.size());
     bool counterIsIntialized = m_pPerfMonitor->isPerfCounterInitialized();
@@ -3438,8 +3440,8 @@ RGY_ERR CQSVPipeline::deviceAutoSelect(const sInputParams *prm, std::vector<std:
             RGYGPUCounterWinEntries(counters).filter_type(L"compute").max()), //vce-opencl
             RGYGPUCounterWinEntries(counters).filter_type(L"3d").max()), //qsv
             RGYGPUCounterWinEntries(counters).filter_type(L"videoprocessing").max());
-        double ve_score = 100.0 * (1.0 - std::pow(ve_utilization / 100.0, 1.0)) * prm->ctrl.gpuSelect.ve;
-        double gpu_score = 100.0 * (1.0 - std::pow(gpu_utilization / 100.0, 1.5)) * prm->ctrl.gpuSelect.gpu;
+        double ve_score = 100.0 * (1.0 - std::pow(std::min(ve_utilization / 100.0, 1.0), 1.0)) * prm->ctrl.gpuSelect.ve;
+        double gpu_score = 100.0 * (1.0 - std::pow(std::min(gpu_utilization / 100.0, 1.0), 1.5)) * prm->ctrl.gpuSelect.gpu;
 #else
         double ve_score = 0.0;
         double gpu_score = 0.0;
@@ -3449,9 +3451,13 @@ RGY_ERR CQSVPipeline::deviceAutoSelect(const sInputParams *prm, std::vector<std:
         double cl_score = gpu->devInfo() ? 0.0 : maxDeviceUsageCount * -100.0; // openclの初期化に成功したか?
         const int deviceUsageCount = (int)gpu->deviceNum() < (int)deviceUsage.size() ? deviceUsage[(int)gpu->deviceNum()].first : 0;
         double usage_score = 100.0 * (maxDeviceUsageCount - deviceUsageCount) / (double)maxDeviceUsageCount;
+        ve_score /= (double)maxDeviceUsageCount;
+        gpu_score /= (double)maxDeviceUsageCount;
+        core_score /= (double)maxDeviceUsageCount;
+        cl_score /= (double)maxDeviceUsageCount;
 
         gpuscore[gpu->deviceNum()] = usage_score + cc_score + ve_score + gpu_score + core_score + cl_score;
-        PrintMes(RGY_LOG_DEBUG, _T("GPU #%d (%s) score: %.1f: Use: %.1f, VE %.1f, GPU %.1f, CC %.1f, Core %.1f, CL %.1f.\n"), gpu->deviceNum(), gpu->name().c_str(),
+        m_pQSVLog->write(RGY_LOG_DEBUG, RGY_LOGT_CORE_GPU_SELECT, _T("%sGPU #%d (%s) score: %.1f: Use: %.1f, VE %.1f, GPU %.1f, CC %.1f, Core %.1f, CL %.1f.\n"), PEPrefix.c_str(), gpu->deviceNum(), gpu->name().c_str(),
             gpuscore[gpu->deviceNum()], usage_score, ve_score, gpu_score, cc_score, core_score, cl_score);
     }
     std::sort(gpuList.begin(), gpuList.end(), [&](const std::unique_ptr<QSVDevice> &a, const std::unique_ptr<QSVDevice> &b) {
@@ -3463,7 +3469,7 @@ RGY_ERR CQSVPipeline::deviceAutoSelect(const sInputParams *prm, std::vector<std:
 
     PrintMes(RGY_LOG_DEBUG, _T("GPU Priority\n"));
     for (const auto &gpu : gpuList) {
-        PrintMes(RGY_LOG_DEBUG, _T("GPU #%d (%s): score %.1f\n"), gpu->deviceNum(), gpu->name().c_str(), gpuscore[gpu->deviceNum()]);
+        PrintMes(RGY_LOG_DEBUG, _T("%sGPU #%d (%s): score %.1f\n"), PEPrefix.c_str(), gpu->deviceNum(), gpu->name().c_str(), gpuscore[gpu->deviceNum()]);
     }
     return RGY_ERR_NONE;
 }
@@ -3745,7 +3751,7 @@ RGY_ERR CQSVPipeline::InitParallelEncode(sInputParams *inputParam, const int max
         }
     }
     m_parallelEnc = std::make_unique<RGYParallelEnc>(m_pQSVLog);
-    if ((sts = m_parallelEnc->parallelRun(inputParam, m_pFileReader.get(), m_outputTimebase, m_pStatus.get())) != RGY_ERR_NONE) {
+    if ((sts = m_parallelEnc->parallelRun(inputParam, m_pFileReader.get(), m_outputTimebase, inputParam->ctrl.parallelEnc.parallelCount > maxEncoders, m_pStatus.get())) != RGY_ERR_NONE) {
         if (inputParam->ctrl.parallelEnc.isChild()) {
             return sts; // 子スレッド側でエラーが起こった場合はエラー
         }
@@ -3764,6 +3770,9 @@ RGY_ERR CQSVPipeline::InitParallelEncode(sInputParams *inputParam, const int max
             }
         }
         return RGY_ERR_NONE; // 親の場合は正常終了(並列動作を無効化して継続)を返す
+    }
+    if (inputParam->ctrl.parallelEnc.isChild()) {
+        m_pQSVLog->write(RGY_LOG_DEBUG, RGY_LOGT_CORE_GPU_SELECT, _T("Parallel Enc %d: Selected GPU #%d (%s)\n"), inputParam->ctrl.parallelEnc.parallelId, m_device->deviceNum(), m_device->name().c_str());
     }
     return RGY_ERR_NONE;
 }
@@ -3931,7 +3940,7 @@ RGY_ERR CQSVPipeline::Init(sInputParams *pParams) {
     RGY_ERR(sts, _T("Failed to initialize encode session."));
     PrintMes(RGY_LOG_DEBUG, _T("InitSession: Success.\n"));
 
-    sts = InitOpenCL(pParams->ctrl.enableOpenCL, pParams->vpp.checkPerformance);
+    sts = InitOpenCL(pParams->ctrl.enableOpenCL, pParams->ctrl.parallelEnc.isParent() ? 1 : pParams->ctrl.openclBuildThreads, pParams->vpp.checkPerformance);
     if (sts < RGY_ERR_NONE) return sts;
     PrintMes(RGY_LOG_DEBUG, _T("InitOpenCL: Success.\n"));
 
@@ -3940,7 +3949,8 @@ RGY_ERR CQSVPipeline::Init(sInputParams *pParams) {
     PrintMes(RGY_LOG_DEBUG, _T("InitInput: Success.\n"));
 
     // 並列動作の子は読み込みが終了したらすぐに並列動作を呼び出し
-    if (pParams->ctrl.parallelEnc.isChild()) {
+    // ただし、親-子間のデータやり取りを少し遅らせる場合(delayChildSync)は親と同じタイミングで処理する
+    if (pParams->ctrl.parallelEnc.isChild() && !pParams->ctrl.parallelEnc.delayChildSync) {
         sts = InitParallelEncode(pParams, (int)m_devNames.size());
         if (sts < RGY_ERR_NONE) return sts;
     }
@@ -3974,7 +3984,7 @@ RGY_ERR CQSVPipeline::Init(sInputParams *pParams) {
     if (sts < RGY_ERR_NONE) return sts;
 
     // 親はエンコード設定が完了してから並列動作を呼び出し
-    if (pParams->ctrl.parallelEnc.isParent()) {
+    if (pParams->ctrl.parallelEnc.isParent() || (pParams->ctrl.parallelEnc.isChild() && pParams->ctrl.parallelEnc.delayChildSync)) {
         sts = InitParallelEncode(pParams, (int)m_devNames.size());
         if (sts < RGY_ERR_NONE) return sts;
     }
@@ -4011,6 +4021,7 @@ RGY_ERR CQSVPipeline::Init(sInputParams *pParams) {
     if ((sts = ResetMFXComponents(pParams)) != RGY_ERR_NONE) {
         return sts;
     }
+
     {
         const auto& threadParam = pParams->ctrl.threadParams.get(RGYThreadType::MAIN);
         threadParam.apply(GetCurrentThread());
@@ -4977,7 +4988,19 @@ RGY_ERR CQSVPipeline::CheckCurrentVideoParam(TCHAR *str, mfxU32 bufSize) {
                 }
             }
             if (outFrameInfo->videoPrm.mfx.BufferSizeInKB > 0) {
-                PRINT_INFO(_T("VBV Bufsize    %d kb\n"), outFrameInfo->videoPrm.mfx.BufferSizeInKB * 8 * (std::max<int>)(m_encParams.videoPrm.mfx.BRCParamMultiplier, 1));
+                int bufSizeInKB = outFrameInfo->videoPrm.mfx.BufferSizeInKB;
+                if (enc_codec == RGY_CODEC_AV1) {
+                    // AV1では、BufferSizeInKBの値がtemporal layersの値の分(=ceil(log2(GopRefDist)))だけ乗算されていると思われるので、
+                    // フレーム単位の値に戻して表示する
+                    int mul = 1;
+                    for (int val = 1; val <= 128; mul++, val *= 2) {
+                        if (val >= outFrameInfo->videoPrm.mfx.GopRefDist) {
+                            break;
+                        }
+                    }
+                    bufSizeInKB /= mul;
+                }
+                PRINT_INFO(_T("VBV Bufsize    %d kb\n"), bufSizeInKB * 8 * (std::max<int>)(m_encParams.videoPrm.mfx.BRCParamMultiplier, 1));
             }
             if (outFrameInfo->cop2.LookAheadDepth > 0) {
                 PRINT_INFO(_T("LookaheadDepth %d\n"), outFrameInfo->cop2.LookAheadDepth);

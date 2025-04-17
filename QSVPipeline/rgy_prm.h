@@ -1245,8 +1245,8 @@ const CX_DESC list_vpp_libplacebo_tone_mapping_gamut_mapping[] = {
 
 const CX_DESC list_vpp_libplacebo_tone_mapping_function[] = {
     { _T("clip"),        (int)VppLibplaceboToneMappingFunction::clip },
-    { _T("st2094_40"),   (int)VppLibplaceboToneMappingFunction::st2094_40 },
-    { _T("st2094_10"),   (int)VppLibplaceboToneMappingFunction::st2094_10 },
+    { _T("st2094-40"),   (int)VppLibplaceboToneMappingFunction::st2094_40 },
+    { _T("st2094-10"),   (int)VppLibplaceboToneMappingFunction::st2094_10 },
     { _T("bt2390"),      (int)VppLibplaceboToneMappingFunction::bt2390 },
     { _T("bt2446a"),     (int)VppLibplaceboToneMappingFunction::bt2446a },
     { _T("spline"),      (int)VppLibplaceboToneMappingFunction::spline },
@@ -2525,6 +2525,7 @@ struct RGYParamParallelEnc {
     int parallelId; // 親=-1, 子=0～
     int chunks; // 分割数
     RGYParamParallelEncCache cacheMode;
+    bool delayChildSync; // 親-子間のデータやり取りを少し遅らせる
     RGYParallelEncSendData *sendData; // 並列処理時に親-子間のデータやり取り用
     RGYParamParallelEnc();
     bool operator==(const RGYParamParallelEnc &x) const;
@@ -2567,6 +2568,7 @@ struct RGYParamControl {
     tstring vsdir;
     bool enableOpenCL;
     RGYParamInitVulkan enableVulkan;
+    int openclBuildThreads;
     RGYParamAvoidIdleClock avoidIdleClock;
     bool processMonitorDevUsage;
     bool processMonitorDevUsageReset;

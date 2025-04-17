@@ -2342,6 +2342,7 @@ RGYParamParallelEnc::RGYParamParallelEnc() :
     parallelId(-1),
     chunks(0),
     cacheMode(RGYParamParallelEncCache::Mem),
+    delayChildSync(false),
     sendData(nullptr) {
 
 };
@@ -2384,6 +2385,7 @@ RGYParamControl::RGYParamControl() :
     vsdir(),
     enableOpenCL(true),
     enableVulkan(RGYParamInitVulkan::TargetVendor),
+    openclBuildThreads(0),
     avoidIdleClock(),
     processMonitorDevUsage(false),
     processMonitorDevUsageReset(false),
