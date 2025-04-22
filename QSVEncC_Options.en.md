@@ -245,6 +245,7 @@
   - [--vpp-pad \<int\>,\<int\>,\<int\>,\<int\>](#--vpp-pad-intintintint)
   - [--vpp-overlay \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-overlay-param1value1param2value2)
   - [--vpp-perc-pre-enc](#--vpp-perc-pre-enc)
+  - [--vpp-ai-frameinterp \[\<param1\>=\<value1\>\]\[,\<param2\>=\<value2\>\],...](#--vpp-ai-frameinterp-param1value1param2value2)
   - [--vpp-perf-monitor](#--vpp-perf-monitor)
 - [Other Options](#other-options)
   - [--parallel \[\<int\>\] or \[\<string\>\]](#--parallel-int-or-string)
@@ -1722,6 +1723,7 @@ Vpp filters will be applied in fixed order, regardless of the order in the comma
   - [--vpp-padding](#--vpp-pad-intintintint)
   - [--vpp-overlay](#--vpp-overlay-param1value1param2value2)
   - [--vpp-perc-pre-enc](#--vpp-perc-pre-enc)
+  - [--vpp-ai-frameinterp](#--vpp-ai-frameinterp-param1value1param2value2)
 
 ### --vpp-colorspace [&lt;param1&gt;=&lt;value1&gt;[,&lt;param2&gt;=&lt;value2&gt;]...]  
 Converts colorspace of the video. Available on x64 version.  
@@ -1940,6 +1942,9 @@ Performs tone mapping using [libplacebo](https://code.videolan.org/videolan/libp
 
   - contrast_smoothness=&lt;float&gt;  
     Contrast recovery lowpass kernel size. Default: 3.5
+
+  - inverse_tone_mapping=&lt;bool&gt;  
+    Inverse tone mapping. Default: false
 
   - visualize_lut=&lt;bool&gt;  
     Visualize tone mapping curve/LUT. Default: false
@@ -3019,6 +3024,13 @@ Overlay image on top of base video.
 
 ### --vpp-perc-pre-enc
 Enable perceptual pre encode filter.
+
+### --vpp-ai-frameinterp [&lt;param1&gt;=&lt;value1&gt;][,&lt;param2&gt;=&lt;value2&gt;],...
+Enable AI Powered frame interpolation, which will double the framerate.
+
+- **Parameters**
+  - scd=&lt;bool&gt; (default: false)  
+    Enable scene change detection.
 
 ### --vpp-perf-monitor
 Print processing time for each filter enabled. This is meant for profiling purpose only, please note that when this option is enabled,
