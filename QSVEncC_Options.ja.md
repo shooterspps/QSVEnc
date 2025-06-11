@@ -10,6 +10,8 @@
     - [パイプ利用の例](#パイプ利用の例)
     - [ffmpegからパイプ渡し](#ffmpegからパイプ渡し)
     - [ffmpegから映像と音声を両方パイプ渡したい](#ffmpegから映像と音声を両方パイプ渡したい)
+    - [ffmpegにNVEncCでのフィルタ処理の結果を渡したい](#ffmpegにnvenccでのフィルタ処理の結果を渡したい)
+    - [可能な限り入力ファイルから音声・字幕・metadataなどをコピーする](#可能な限り入力ファイルから音声字幕metadataなどをコピーする)
     - [raw H.264/ESのmux](#raw-h264esのmux)
 - [オプションの指定方法](#オプションの指定方法)
 - [表示系オプション](#表示系オプション)
@@ -318,6 +320,18 @@ ffmpeg -y -i "<ソース動画>" -an -pix_fmt yuv420p -f yuv4mpegpipe - | QSVEnc
 --> "nut"フォーマットでくるんで受け渡しするとよいでしょう
 ```Batchfile
 ffmpeg -y -i "<input>" <options for ffmpeg> -codec:a copy -codec:v rawvideo -pix_fmt yuv420p -f nut - | QSVEncC --avsw -i - --audio-codec aac -o "<outfilename.mp4>"
+```
+
+#### ffmpegにNVEncCでのフィルタ処理の結果を渡したい
+--> "nut"フォーマットでフレームと音声を渡すとよいでしょう。
+```Batchfile
+NVEncC -i "<input>" <filter options> --audio-copy -c raw --output-format nut -o - | ffmpeg -y -f nut -i - <encode options for ffmpeg> -o output.mp4
+```
+
+#### 可能な限り入力ファイルから音声・字幕・metadataなどをコピーする
+
+```Batchfile
+NVEncC -i "<input>" <encode options> --colormatrix auto --transfer auto --colorprim auto --chromaloc auto --max-cll copy --master-display copy --dhdr10-info copy --dolby-vision-rpu copy --video-metadata copy --audio-copy --audio-metadata copy  --sub-copy --sub-metadata copy --data-copy --attachment-copy --chapter-copy -o output.mkv
 ```
 
 #### raw H.264/ESのmux
@@ -3123,6 +3137,19 @@ AIベースのフレーム補間を用いて、フレームレートを倍にす
   - --vpp-subburn（字幕焼きこみ）が指定されている場合
   - --vpp-fruc（フレーム補間）が有効な場合
 
+- **並列時の速度について**
+
+  並列エンコードではファイルを分割し、複数のエンコーダを並列で動作させることで高速化します。
+  出力は順次行われるため、ログに表示される速度には最初のエンコーダの担当範囲が終わるまで、
+  他のエンコーダの速度は反映されません。従って見かけ上後半に行くほどfpsが上がるように見えます。
+  
+  最大限の高速化を得るには使用する複数のGPUが対称であることが望ましいです。
+  すなわちGPUのエンコーダの世代、GPUの性能、PCIe接続帯域などが一致しているほど、より大きく高速化できます。
+
+  またdGPUなどでMedia Function Unitを複数搭載している場合、
+  その数分並列させるとさらなる性能を引き出せる可能性があります。
+  この時、CPUに十分な性能があればhwデコードよりもswデコードの方が高速に処理できる場合があります。
+
 - **使用例**
   ```
   例: 自動で並列数を決定
@@ -3229,6 +3256,12 @@ Windowsのタイマー精度を向上させ、高速化する。いわゆるtime
 - **パラメータ**  
   - addtime (デフォルト=off)  
     ログの各行に時刻を表示するように。
+
+  - addlevel (デフォルト=off)  
+    ログの各行にログレベルを表示するように。
+
+  - color (デフォルト=on)
+    ログの色表示の切り替え。
 
 ### --log-framelist [&lt;string&gt;]
 avsw/avhw読み込み時のデバッグ情報出力。

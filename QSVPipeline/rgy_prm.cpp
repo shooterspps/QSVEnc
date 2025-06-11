@@ -2361,6 +2361,17 @@ bool RGYParamParallelEnc::operator!=(const RGYParamParallelEnc &x) const {
     return !(*this == x);
 }
 
+RGYParamLogOpt::RGYParamLogOpt() : addTime(false), addLogLevel(false), disableColor(false) {}
+
+bool RGYParamLogOpt::operator==(const RGYParamLogOpt &x) const {
+    return addTime == x.addTime
+        && addLogLevel == x.addLogLevel
+        && disableColor == x.disableColor;
+}
+bool RGYParamLogOpt::operator!=(const RGYParamLogOpt &x) const {
+    return !(*this == x);
+}
+
 RGYParamCommon::~RGYParamCommon() {};
 
 RGYParamControl::RGYParamControl() :
@@ -2368,7 +2379,7 @@ RGYParamControl::RGYParamControl() :
     simdCsp(RGY_SIMD::SIMD_ALL),
     logfile(),              //ログ出力先
     loglevel(RGY_LOG_INFO),                 //ログ出力レベル
-    logAddTime(false),
+    logOpt(),
     logFramePosList(),     //framePosList出力
     logPacketsList(),
     logMuxVidTs(),
@@ -2500,19 +2511,9 @@ bool invalid_with_raw_out(const RGYParamCommon &prm, shared_ptr<RGYLog> log) {
     INVALID_WITH_RAW_OUT(prm.hdr10plusMetadataCopy, "--dhdr10-info copy");
     INVALID_WITH_RAW_OUT(prm.dynamicHdr10plusJson.length() > 0, "--dhdr10-info");
     INVALID_WITH_RAW_OUT(prm.doviRpuFile.length() > 0, "--dolby-vision-rpu");
-    INVALID_WITH_RAW_OUT(prm.nAudioSelectCount > 0, "audio related options");
-    INVALID_WITH_RAW_OUT(prm.audioSource.size() > 0, "--audio-source");
-    INVALID_WITH_RAW_OUT(prm.nSubtitleSelectCount > 0, "subtitle related options");
-    INVALID_WITH_RAW_OUT(prm.subSource.size() > 0, "--sub-source");
-    INVALID_WITH_RAW_OUT(prm.nDataSelectCount > 0, "data related options");
-    INVALID_WITH_RAW_OUT(prm.nAttachmentSelectCount > 0, "--attachment-copy");
     INVALID_WITH_RAW_OUT(prm.chapterFile.length() > 0, "--chapter");
     INVALID_WITH_RAW_OUT(prm.copyChapter, "--chapter-copy");
-    INVALID_WITH_RAW_OUT(prm.formatMetadata.size() > 0, "--metadata");
-    INVALID_WITH_RAW_OUT(prm.videoMetadata.size() > 0, "--video-metadata");
-    INVALID_WITH_RAW_OUT(prm.muxOpt.size() > 0, "-m");
     INVALID_WITH_RAW_OUT(prm.keyFile.length() > 0, "--keyfile");
-    INVALID_WITH_RAW_OUT(prm.timecodeFile.length() > 0, "--timecode");
     INVALID_WITH_RAW_OUT(prm.metric.ssim, "--ssim");
     INVALID_WITH_RAW_OUT(prm.metric.psnr, "--psnr");
     INVALID_WITH_RAW_OUT(prm.metric.vmaf.enable, "--vmaf");

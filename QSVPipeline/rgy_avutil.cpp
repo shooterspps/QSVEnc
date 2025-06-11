@@ -128,6 +128,15 @@ int64_t rgy_avframe_get_duration(const AVFrame *frame) {
 #endif
 }
 
+//AVFrameのdurationを取得
+int64_t& rgy_avframe_get_duration_ref(AVFrame *frame) {
+#if AV_FRAME_DURATION_AVAIL
+    return frame->duration;
+#else
+    return frame->pkt_duration;
+#endif
+}
+
 bool rgy_avframe_interlaced(const AVFrame *frame) {
 #if defined(AV_FRAME_FLAG_INTERLACED)
     return (frame->flags & AV_FRAME_FLAG_INTERLACED) != 0;
@@ -879,7 +888,7 @@ static const auto CSP_PIXFMT_RGY = make_array<std::pair<AVPixelFormat, RGY_CSP>>
     std::make_pair(AV_PIX_FMT_YUVA420P16LE, RGY_CSP_YUVA420_16),
     std::make_pair(AV_PIX_FMT_YUVA420P10LE, RGY_CSP_YUVA420_10),
     std::make_pair(AV_PIX_FMT_YUVA420P,    RGY_CSP_YUVA420),
-    std::make_pair(AV_PIX_FMT_NV20LE,      RGY_CSP_NA),
+    std::make_pair(AV_PIX_FMT_NV20LE,      RGY_CSP_P210),
     std::make_pair(AV_PIX_FMT_YUV422P16LE, RGY_CSP_YUV422_16),
     std::make_pair(AV_PIX_FMT_YUV422P14LE, RGY_CSP_YUV422_14),
     std::make_pair(AV_PIX_FMT_YUV422P12LE, RGY_CSP_YUV422_12),
