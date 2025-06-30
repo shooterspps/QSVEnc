@@ -38,6 +38,10 @@
 // YUV420 0
 // BIT_DEPTH
 // SUB_GROUP_SIZE
+// SELECT_PLANE
+// SELECT_PLANE_Y
+// SELECT_PLANE_U
+// SELECT_PLANE_V
 
 __constant sampler_t sampler_y = CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP_TO_EDGE | CLK_FILTER_NEAREST;
 #if YUV420
@@ -121,8 +125,8 @@ typedef uint          Flag4U;
 
 Flag4U analyze_motion(DATA4 p0, DATA4 p1, DATA thre_motion, DATA thre_shift) {
     DATA4 absdata = abs_diff(p0, p1);
-    Flag4 mask_motion = CONVERT_FLAG4_SAT((DATA4)thre_motion > absdata) ? (Flag4)motion_flag  : (Flag4)0;
-    Flag4 mask_shift  = CONVERT_FLAG4_SAT((DATA4)thre_shift  > absdata) ? (Flag4)motion_shift : (Flag4)0;
+    Flag4 mask_motion = CONVERT_FLAG4_SAT(((DATA4)thre_motion > absdata) ? (DATA4)motion_flag  : (DATA4)0);
+    Flag4 mask_shift  = CONVERT_FLAG4_SAT(((DATA4)thre_shift  > absdata) ? (DATA4)motion_shift : (DATA4)0);
     return AS_FLAG4U(mask_motion) | AS_FLAG4U(mask_shift);
 }
 
@@ -135,9 +139,9 @@ Flag4U analyze_motionf(float p0, float p1, const float thre_motionf, const float
 
 Flag4U analyze_stripe(DATA4 p0, DATA4 p1, Flag flag_sign, Flag flag_deint, Flag flag_shift, const DATA thre_deint, const DATA thre_shift) {
     DATA4 absdata = abs_diff(p0, p1);
-    Flag4 new_sign   = CONVERT_FLAG4_SAT(p0 >= p1) ? (Flag4)flag_sign : (Flag4)0;
-    Flag4 mask_deint = CONVERT_FLAG4_SAT(absdata > (DATA4)thre_deint) ? (Flag4)flag_deint : (Flag4)0;
-    Flag4 mask_shift = CONVERT_FLAG4_SAT(absdata > (DATA4)thre_shift) ? (Flag4)flag_shift : (Flag4)0;
+    Flag4 new_sign   = CONVERT_FLAG4_SAT((p0 >= p1)                    ? (DATA4)flag_sign  : (DATA4)0);
+    Flag4 mask_deint = CONVERT_FLAG4_SAT((absdata > (DATA4)thre_deint) ? (DATA4)flag_deint : (DATA4)0);
+    Flag4 mask_shift = CONVERT_FLAG4_SAT((absdata > (DATA4)thre_shift) ? (DATA4)flag_shift : (DATA4)0);
     return AS_FLAG4U(new_sign) | AS_FLAG4U(mask_deint) | AS_FLAG4U(mask_shift);
 }
 
@@ -210,7 +214,7 @@ Flag4U analyze_c(
     int ix, int iy,
     const float thre_motionf, const float thre_deintf, const float thre_shiftf) {
     Flag4U flag4 = 0;
-    float ifx = (ix << 1) + 0.5f;
+    float ifx = (ix << 1) + 0.5f; // ixは4ピクセル単位、その半分だがcは1ピクセル単位なので2倍する
 
     #pragma unroll
     for (int i = 0; i < 4; i++, ifx += 0.5f) {
@@ -337,8 +341,19 @@ Flag4U generate_flags(int ly, int idepth, __local Flag4U *restrict ptr_shared) {
 }
 
 void merge_mask(Flag4U masky, Flag4U masku, Flag4U maskv, Flag4U *restrict mask0, Flag4U *restrict mask1) {
-    *mask0 = masky & masku & maskv;
-    *mask1 = masky | masku | maskv;
+    // tune_modeの値に基づいてビット演算でマスクを選択
+    // 各ビット位置で選択するマスクを決定
+    if (SELECT_PLANE != 0) {
+        const Flag4U select_y = (SELECT_PLANE & SELECT_PLANE_Y) ? 0xffffffff : 0x00;
+        const Flag4U select_u = (SELECT_PLANE & SELECT_PLANE_U) ? 0xffffffff : 0x00;
+        const Flag4U select_v = (SELECT_PLANE & SELECT_PLANE_V) ? 0xffffffff : 0x00;
+
+        *mask0 = (masky | (~select_y)) & (masku | (~select_u)) & (maskv | (~select_v));
+        *mask1 = (masky & select_y)    | (masku & select_u)    | (maskv & select_v);
+    } else {
+        *mask0 = masky & masku & maskv;
+        *mask1 = masky | masku | maskv;
+    }
 
     *mask0 &= u8x4(0xcc); //motion
     *mask1 &= u8x4(0x33); //shift/deint
@@ -427,7 +442,7 @@ __kernel void kernel_afs_analyze_12(
                     motion_count += popcount((~mask1) & u8x4(0x40)); //opencl版を変更、xorしてからマスク
                 }
                 //判定結果の出力
-                ptr_dst[0] = mask1;
+                ptr_dst[0] = AS_FLAG4(mask1);
             }
             //次に書き換えるのは(x,y,0)(x,y,1)(x,y,2)なので、(x,y,3)の読み込みと同時に行うことができる
             //ここでの同期は不要

@@ -397,7 +397,7 @@ RGY_ERR CQSVPipeline::InitMfxDecParams() {
             //VP8/VP9のデコードでは、mfxBitstreamに複数のフレームのデータがあるとうまく動作しないことがあるためこれを回避する。
             //ここで読み込んだ第1フレームは読み込み側から消さないようにすることで、
             //メインループで再び第1フレームのデータとして読み込むことができる。
-            m_pFileReader->GetNextBitstreamNoDelete(&m_DecInputBitstream);
+            m_pFileReader->GetNextBitstreamNoDelete(&m_DecInputBitstream, 0);
         }
 
         //デコーダの作成
@@ -2331,7 +2331,7 @@ std::pair<RGY_ERR, std::unique_ptr<QSVVppMfx>> CQSVPipeline::AddFilterMFX(
     m_device->mfxSession().QueryIMPL(&impl);
     auto mfxvpp = std::make_unique<QSVVppMfx>(m_device->hwdev(), m_device->allocator(), m_mfxVer, impl, m_device->memType(), m_sessionParams, m_device->deviceNum(), m_nAsyncDepth, m_pQSVLog);
     auto err = mfxvpp->SetParam(vppParams, frameInfo, frameIn, (vppType == VppType::MFX_CROP) ? crop : nullptr,
-        fps, rgy_rational<int>(1,1), blockSize);
+        fps, rgy_rational<int>(1,1), params->deinterlaceMode, blockSize);
     if (err != RGY_ERR_NONE) {
         return { err, std::unique_ptr<QSVVppMfx>() };
     }

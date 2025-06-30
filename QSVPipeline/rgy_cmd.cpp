@@ -38,18 +38,13 @@
 #include "rgy_perf_monitor.h"
 #include "rgy_osdep.h"
 
-#if FOR_AUO
-#pragma warning (disable: 4100)
-#else
-#if ENABLE_CPP_REGEX
-#include <regex>
-#endif //#if ENABLE_CPP_REGEX
-#if ENABLE_DTL
-#include <dtl/dtl.hpp>
-#endif //#if ENABLE_DTL
-
 std::vector<tstring> splitCommandLine(const TCHAR *cmd) {
     std::vector<tstring> result;
+    if (cmd == nullptr || _tcslen(cmd) == 0) {
+        // configstrが空文字列の場合、CommandLineToArgvWに渡すと先頭に実行ファイルへのパスが付与されてしまう
+        // 混乱を避けるため、ここでreturnする
+        return result;
+    }
 #if defined(_WIN32) || defined(_WIN64)
     std::wstring cmdw = tchar_to_wstring(cmd);
     int argc = 0;
@@ -57,16 +52,11 @@ std::vector<tstring> splitCommandLine(const TCHAR *cmd) {
     if (argc <= 1) {
         return result;
     }
-    if (wcslen(argvw[0]) != 0) {
-        result.push_back(_T("")); // 最初は実行ファイルのパスが入っているのを模擬するため、空文字列を入れておく
-    }
     for (int i = 0; i < argc; i++) {
         result.push_back(wstring_to_tstring(argvw[i]));
     }
     LocalFree(argvw);
 #else
-    result.push_back(_T("")); // 最初は実行ファイルのパスが入っているのを模擬するため、空文字列を入れておく
-
     tstring token;
     bool inDoubleQuotes = false;
     bool inSingleQuotes = false;
@@ -109,6 +99,16 @@ std::vector<tstring> splitCommandLine(const TCHAR *cmd) {
 #endif
     return result;
 }
+
+#if FOR_AUO
+#pragma warning (disable: 4100)
+#else
+#if ENABLE_CPP_REGEX
+#include <regex>
+#endif //#if ENABLE_CPP_REGEX
+#if ENABLE_DTL
+#include <dtl/dtl.hpp>
+#endif //#if ENABLE_DTL
 
 #if ENABLE_CPP_REGEX
 std::vector<std::pair<std::string, std::string>> createOptionList() {
@@ -309,7 +309,6 @@ void print_cmd_error_invalid_value(tstring strOptionName, tstring strErrorValue,
 }
 
 std::vector<tstring> cmd_from_config_file(const tstring& filename) {
-#if defined(_WIN32) || defined(_WIN64)
     std::ifstream ifs(filename);
     if (ifs.fail()) {
         _ftprintf(stderr, _T("Failed to open option file!\n"));
@@ -328,18 +327,12 @@ std::vector<tstring> cmd_from_config_file(const tstring& filename) {
             configstr += trim(str);
         }
     }
-    //configstrが空文字列の場合、sep_cmdに渡すと先頭に実行ファイルへのパスが付与されてしまう
     //エラーを避けるため、空のvectorを返すようにする
     if (configstr.length() == 0) {
         _ftprintf(stderr, _T("Option file is empty!\n"));
         return std::vector<tstring>();
     }
-    return sep_cmd(char_to_tstring(configstr));
-#else
-    _ftprintf(stderr, _T("--option-file not supported on linux systems!\n"));
-    exit(1);
-    return std::vector<tstring>();
-#endif
+    return splitCommandLine(char_to_tstring(configstr).c_str());
 }
 
 int cmd_string_to_bool(bool *b, const tstring &str) {
@@ -1784,9 +1777,11 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                     continue;
                 }
                 if (param_arg == _T("tune")) {
-                    bool b = false;
+                    bool b = false; int value = 0;
                     if (!cmd_string_to_bool(&b, param_val)) {
-                        vpp->afs.tune = b;
+                        vpp->afs.tune = b ? AFS_TUNE_MODE_FINAL : AFS_TUNE_MODE_NONE;
+                    } else if (get_list_value(list_afs_tune_mode, param_val.c_str(), &value)) {
+                        vpp->afs.tune = (AFS_TUNE_MODE)value;
                     } else {
                         print_cmd_error_invalid_value(tstring(option_name) + _T(" ") + param_arg + _T("="), param_val);
                         return 1;
@@ -1849,7 +1844,7 @@ int parse_one_vpp_option(const TCHAR *option_name, const TCHAR *strInput[], int 
                     continue;
                 }
                 if (param == _T("tune")) {
-                    vpp->afs.tune = true;
+                    vpp->afs.tune = AFS_TUNE_MODE_FINAL;
                     continue;
                 }
                 print_cmd_error_unknown_opt_param(option_name, param, paramList);
@@ -7498,7 +7493,7 @@ tstring gen_cmd(const RGYParamVpp *param, const RGYParamVpp *defaultPrm, bool sa
             ADD_BOOL(_T("drop"), afs.drop);
             ADD_BOOL(_T("smooth"), afs.smooth);
             ADD_BOOL(_T("24fps"), afs.force24);
-            ADD_BOOL(_T("tune"), afs.tune);
+            ADD_LST(_T("tune"), afs.tune, list_afs_tune_mode);
             ADD_BOOL(_T("rff"), afs.rff);
             ADD_BOOL(_T("timecode"), afs.timecode);
             ADD_BOOL(_T("log"), afs.log);

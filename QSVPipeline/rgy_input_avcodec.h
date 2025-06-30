@@ -48,6 +48,8 @@ using std::vector;
 using std::pair;
 using std::deque;
 
+struct pixfmtInfo;
+
 static const uint32_t AVCODEC_READER_INPUT_BUF_SIZE = 16 * 1024 * 1024;
 static const uint32_t AV_FRAME_MAX_REORDER = 16;
 static const int FRAMEPOS_POC_INVALID = -1;
@@ -875,7 +877,7 @@ public:
     virtual RGY_ERR GetNextBitstream(RGYBitstream *pBitstream) override;
 
     //動画ストリームの1フレーム分のデータをbitstreamに追加する (リーダー側のデータは残す)
-    virtual RGY_ERR GetNextBitstreamNoDelete(RGYBitstream *pBitstream) override;
+    virtual RGY_ERR GetNextBitstreamNoDelete(RGYBitstream *pBitstream, int idx) override;
 
     //ストリームのヘッダ部分を取得する
     virtual RGY_ERR GetHeader(RGYBitstream *pBitstream) override;
@@ -948,6 +950,12 @@ public:
 
     //並列エンコードの親側で不要なデコーダを終了させる
     void CloseVideoDecoder();
+
+    //swデコーダの初期化
+    RGY_ERR initSWVideoDecoder(const tstring& avswDecoder);
+
+
+    const pixfmtInfo *getPixfmtInfo(const AVPixelFormat pix_fmt);
 
 #if USE_CUSTOM_INPUT
     int readPacket(uint8_t *buf, int buf_size);
